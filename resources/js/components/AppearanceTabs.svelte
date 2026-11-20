@@ -2,15 +2,13 @@
     import Monitor from '@lucide/svelte/icons/monitor';
     import Moon from '@lucide/svelte/icons/moon';
     import Sun from '@lucide/svelte/icons/sun';
-    import type { Component, SvelteComponent } from 'svelte';
+    import type { Component } from 'svelte';
     import { themeState } from '@/lib/theme.svelte';
     import type { Appearance } from '@/types';
 
     const { appearance, updateAppearance } = themeState();
 
-    type IconComponent =
-        | Component<{ class?: string }>
-        | (new (...args: any[]) => SvelteComponent<{ class?: string }>);
+    type IconComponent = Component<{ class?: string }>;
 
     const tabs: { value: Appearance; Icon: IconComponent; label: string }[] = [
         { value: 'light', Icon: Sun, label: 'Light' },
