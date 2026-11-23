@@ -16,7 +16,6 @@
     import { Input } from '@/components/ui/input';
     import { Label } from '@/components/ui/label';
     import { Spinner } from '@/components/ui/spinner';
-    import { register } from '@/routes';
     import { store } from '@/routes/login';
     import { request } from '@/routes/password';
 
@@ -46,14 +45,14 @@
     {#snippet children({ errors, processing })}
         <div class="grid gap-6">
             <div class="grid gap-2">
-                <Label for="email">Email address</Label>
+                <Label for="email">NIK atau Email</Label>
                 <Input
                     id="email"
-                    type="email"
+                    type="text"
                     name="email"
                     required
                     autocomplete="email"
-                    placeholder="email@example.com"
+                    placeholder="NIK atau email@lsi.co.id"
                 />
                 <InputError message={errors.email} />
             </div>
@@ -93,11 +92,6 @@
                 {#if processing}<Spinner />{/if}
                 Log in
             </Button>
-        </div>
-
-        <div class="text-center text-sm text-muted-foreground">
-            Don't have an account?
-            <TextLink href={register()}>Sign up</TextLink>
         </div>
     {/snippet}
 </Form>

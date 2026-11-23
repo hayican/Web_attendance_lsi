@@ -1,7 +1,7 @@
 <?php
 
 use App\Models\User;
-use Illuminate\Support\Facades\RateLimiter;
+use App\Services\LoginThrottleService;
 
 test('login screen can be rendered', function () {
     $response = $this->get(route('login'));
@@ -18,7 +18,7 @@ test('users can authenticate using the login screen', function () {
     ]);
 
     $this->assertAuthenticated();
-    $response->assertRedirect(route('dashboard', absolute: false));
+    $response->assertRedirect(route('attendance.office', absolute: false));
 });
 
 test('users can not authenticate with invalid password', function () {
@@ -44,13 +44,16 @@ test('users can logout', function () {
 
 test('users are rate limited', function () {
     $user = User::factory()->create();
+    $throttle = app(LoginThrottleService::class);
 
-    RateLimiter::increment(md5('login'.implode('|', [$user->email, '127.0.0.1'])), amount: 5);
+    for ($i = 0; $i < 5; $i++) {
+        $throttle->recordFailure($user->email, '127.0.0.1', $user->id);
+    }
 
     $response = $this->post(route('login.store'), [
         'email' => $user->email,
         'password' => 'wrong-password',
     ]);
 
-    $response->assertTooManyRequests();
+    $response->assertSessionHasErrors('email');
 });

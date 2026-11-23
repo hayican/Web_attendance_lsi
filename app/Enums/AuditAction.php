@@ -1,0 +1,18 @@
+<?php
+
+namespace App\Enums;
+
+enum AuditAction: string
+{
+    case CREATE = 'CREATE';
+    case UPDATE = 'UPDATE';
+    case SOFT_DELETE = 'SOFT_DELETE';
+    case RESET_PASSWORD = 'RESET_PASSWORD';
+    case UNLOCK_ACCOUNT = 'UNLOCK_ACCOUNT';
+    case CORRECT_STATUS = 'CORRECT_STATUS';
+    case MANUAL_ATTENDANCE = 'MANUAL_ATTENDANCE';
+    case BULK_IMPORT = 'BULK_IMPORT';
+    case CANCEL_LEAVE = 'CANCEL_LEAVE';
+    case OVERRIDE_LIMIT = 'OVERRIDE_LIMIT';
+    case EXPORT_ATTENDANCE = 'EXPORT_ATTENDANCE';
+}

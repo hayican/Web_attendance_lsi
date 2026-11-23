@@ -1,5 +1,10 @@
 <?php
 
+use App\Http\Middleware\EnsureConsentAccepted;
+use App\Http\Middleware\EnsureDeviceCookie;
+use App\Http\Middleware\EnsurePasswordChanged;
+use App\Http\Middleware\EnsureRole;
+use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\HandleAppearance;
 use App\Http\Middleware\HandleInertiaRequests;
 use Illuminate\Foundation\Application;
@@ -18,9 +23,17 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->encryptCookies(except: ['appearance', 'sidebar_state']);
 
         $middleware->web(append: [
+            EnsureDeviceCookie::class,
             HandleAppearance::class,
             HandleInertiaRequests::class,
             AddLinkHeadersForPreloadedAssets::class,
+        ]);
+
+        $middleware->alias([
+            'active' => EnsureUserIsActive::class,
+            'password.changed' => EnsurePasswordChanged::class,
+            'consent' => EnsureConsentAccepted::class,
+            'role' => EnsureRole::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

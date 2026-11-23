@@ -29,9 +29,17 @@ class SecurityController extends Controller
      */
     public function update(PasswordUpdateRequest $request): RedirectResponse
     {
-        $request->user()->update([
+        $user = $request->user();
+        $wasForced = (bool) $user?->must_change_password;
+
+        $user?->update([
             'password' => $request->password,
+            'must_change_password' => false,
         ]);
+
+        if ($wasForced) {
+            return redirect()->to('/dashboard');
+        }
 
         Inertia::flash('toast', ['type' => 'success', 'message' => __('Password updated.')]);
 

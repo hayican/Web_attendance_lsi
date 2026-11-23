@@ -1,5 +1,6 @@
 import type { LinkComponentBaseProps } from '@inertiajs/core';
 import { page } from '@inertiajs/svelte';
+import { SvelteURL } from 'svelte/reactivity';
 import { toUrl } from '@/lib/utils';
 
 export type CurrentUrlState = {
@@ -28,7 +29,7 @@ export function currentUrlState(): CurrentUrlState {
                 : window.location.origin;
 
         try {
-            return new URL(page.url, origin).pathname;
+            return new SvelteURL(page.url, origin).pathname;
         } catch {
             return page.url;
         }
