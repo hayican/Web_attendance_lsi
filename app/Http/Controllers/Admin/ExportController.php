@@ -121,7 +121,6 @@ class ExportController extends Controller
                         LeaveType::CUTI => (string) ($mappings['timeoff_annual'] ?? 'CT'),
                         LeaveType::IZIN => (string) ($mappings['timeoff_izin'] ?? 'IZ'),
                         LeaveType::SAKIT => (string) ($mappings['timeoff_sakit'] ?? 'SK'),
-                        LeaveType::DINAS_LUAR => '',
                     };
                 } elseif ($log !== null && $log->clock_in_status !== VerificationStatus::REJECTED) {
                     $attCode = $presentCode;

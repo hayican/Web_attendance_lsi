@@ -36,13 +36,13 @@
 
         L.circle([targetLat, targetLng], {
             radius: radiusM,
-            color: '#2563eb',
+            color: '#6F3E1D',
             fillOpacity: 0.15,
         }).addTo(map);
 
         L.circleMarker([targetLat, targetLng], {
             radius: 6,
-            color: '#1d4ed8',
+            color: '#6F3E1D',
         })
             .bindPopup(label)
             .addTo(map);
@@ -50,7 +50,7 @@
         if (userLat !== null && userLng !== null) {
             L.circleMarker([userLat, userLng], {
                 radius: 6,
-                color: '#dc2626',
+                color: '#1D4ED8',
             })
                 .bindPopup('Posisi User')
                 .addTo(map);
@@ -58,7 +58,7 @@
             if (accuracyM !== null && accuracyM > 0) {
                 L.circle([userLat, userLng], {
                     radius: accuracyM,
-                    color: '#dc2626',
+                    color: '#1D4ED8',
                     dashArray: '4 4',
                     fillOpacity: 0.08,
                 }).addTo(map);
@@ -74,6 +74,6 @@
 
 <div
     bind:this={container}
-    class="h-56 w-full rounded-lg border"
+    class="h-72 w-full rounded-md border border-stone-200"
     aria-label="Peta verifikasi lokasi"
 ></div>

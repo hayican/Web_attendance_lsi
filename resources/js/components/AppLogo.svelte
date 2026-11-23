@@ -1,15 +1,9 @@
-<script lang="ts">
-    import { page } from '@inertiajs/svelte';
-    import AppLogoIcon from '@/components/AppLogoIcon.svelte';
-
-    const name = $derived(page.props.name);
-</script>
-
-<div
-    class="flex aspect-square size-8 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground"
->
-    <AppLogoIcon class="size-5 fill-current text-white dark:text-black" />
-</div>
-<div class="ml-1 grid flex-1 text-left text-sm">
-    <span class="mb-0.5 truncate leading-tight font-semibold">{name}</span>
+<img
+    src="/images/logo-ladang-lima.webp"
+    alt="Ladang Lima Logo"
+    class="h-7 w-auto max-w-[120px] object-contain shrink-0"
+/>
+<div class="ml-2 grid flex-1 text-left text-xs leading-tight">
+    <span class="truncate font-semibold text-stone-900">Dashboard Absensi</span>
+    <span class="truncate text-[11px] font-medium text-[#6F3E1D]">Ladang Lima</span>
 </div>
