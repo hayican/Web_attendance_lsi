@@ -8,7 +8,19 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $user_id
+ * @property LeaveType $type
+ * @property Carbon $start_date
+ * @property Carbon $end_date
+ * @property string $total_days
+ * @property string|null $destination_location
+ * @property string|null $scheduled_start_time
+ * @property LeaveStatus $status
+ */
 #[Fillable([
     'user_id',
     'type',

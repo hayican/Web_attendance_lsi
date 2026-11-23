@@ -6,7 +6,17 @@ use App\Enums\LeaveDayStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $leave_request_id
+ * @property int $user_id
+ * @property Carbon $leave_date
+ * @property string $day_value
+ * @property LeaveDayStatus $status
+ * @property-read LeaveRequest|null $leaveRequest
+ */
 #[Fillable([
     'leave_request_id',
     'user_id',

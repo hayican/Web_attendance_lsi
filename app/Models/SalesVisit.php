@@ -8,7 +8,35 @@ use App\Enums\VisitStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $user_id
+ * @property int $outlet_location_id
+ * @property AttendanceSource $source
+ * @property Carbon $visit_date
+ * @property Carbon|null $visit_in_at
+ * @property string|null $visit_in_photo_url
+ * @property string|null $visit_in_lat
+ * @property string|null $visit_in_lng
+ * @property string|null $visit_in_accuracy_m
+ * @property string|null $visit_in_distance_m
+ * @property string|null $visit_in_device_id
+ * @property Carbon|null $visit_out_at
+ * @property int|null $duration_minutes
+ * @property int|null $activity_category_id
+ * @property string|null $visit_out_lat
+ * @property string|null $visit_out_lng
+ * @property string|null $visit_out_accuracy_m
+ * @property string|null $visit_out_distance_m
+ * @property string|null $visit_out_device_id
+ * @property VisitStatus $visit_status
+ * @property VerificationStatus $verification_status
+ * @property list<string>|null $anomaly_flags
+ * @property-read User $user
+ * @property-read Location $outletLocation
+ */
 #[Fillable([
     'user_id',
     'outlet_location_id',

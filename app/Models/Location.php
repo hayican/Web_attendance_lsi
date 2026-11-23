@@ -10,7 +10,25 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property string|null $code
+ * @property string $name
+ * @property LocationType $type
+ * @property string $address
+ * @property string $latitude
+ * @property string $longitude
+ * @property int $radius_m
+ * @property string $timezone
+ * @property array<int, int> $work_days
+ * @property LocationStatus $status
+ * @property string|null $reject_reason
+ * @property int|null $created_by
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ */
 #[Fillable([
     'code',
     'name',
