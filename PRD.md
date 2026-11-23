@@ -1,0 +1,894 @@
+PRD: Hybrid Live Attendance v5 
+
+# **1. Introduction / Overview** 
+
+Intinya: Aplikasi web absensi, kunjungan lapangan, dan pengajuan cuti/izin/sakit (ESS) PT. LSI yang fokus pada akurasi lokasi/foto dan anti-kecurangan, tanpa modul hitung gaji (payroll). 
+
+Ruang Lingkup & Cabang: Mencatat kehadiran staf kantor (EMPLOYEE_OFFICE dan HR_ADMIN) serta kunjungan toko tim sales (EMPLOYEE_SALES) lintas 5 cabang PT. LSI (Jakarta, Surabaya SIER, Surabaya Ketintang, Pasuruan, dan Bali). Karyawan divisi produksi yang menggunakan mesin fingerprint terpisah tidak dimasukkan ke aplikasi web ini maupun ke sistem Mekari Talenta. 
+
+Pembagian 3 Peran (Role) Pengguna: 
+
+1. Staf Kantor (EMPLOYEE_OFFICE): Khusus melakukan absen masuk (Clock-In) dan pulang (Clock-Out) sesuai jadwal shift di lokasi kantor masing-masing (/attendance/office), dan tidak memiliki akses ke menu kunjungan toko sales (/attendance/sales). Untuk tugas luar mendadak pada hari-H, staf wajib Clock-In di kantor terlebih dahulu lalu izin langsung ke HR/atasan (dan dapat Clock-Out dari lokasi luar); sedangkan untuk dinas luar terjadwal (misal luar kota atau janji temu klien pagi hari), staf mengajukan DINAS_LUAR melalui modul ESS (/leave) sebelum hari-H. 
+
+2. Tim Sales Lapangan (EMPLOYEE_SALES): Jam kerja fleksibel di lapangan; satu-satunya peran yang menggunakan fitur kunjungan toko (/attendance/sales) dengan Visit In (kunci titik GPS dan wajib ambil 1x foto selfie kamera langsung saat tiba di toko) dan Visit Out (isi kategori aktivitas serta catatan laporan singkat saat selesai, tanpa foto), serta tidak menggunakan fitur Clock-In/Out kantor. 
+
+3. Staf HR Admin (HR_ADMIN): Mengelola data master (karyawan, shift, lokasi kantor, daftar toko, kategori aktivitas), memantau rekap kehadiran, serta memverifikasi (Approve/Reject) absensi dan 
+
+pengajuan cuti/izin/sakit/dinas luar milik EMPLOYEE_OFFICE, EMPLOYEE_SALES, maupun sesama akun HR_ADMIN lain (bukan milik sendiri). 
+
+Aturan Khusus Absen & Pengajuan HR_ADMIN: Wajib absen kantor harian lewat menu 'Absen Saya' (/attendance/office), dan dilarang menyetujui/menolak absensi maupun pengajuan cuti/izin/sakit/ dinas luar miliknya sendiri (reviewed_by != user_id; wajib diverifikasi oleh akun HR_ADMIN lainnya). 
+
+# **2. Goals (Tujuan Utama Sistem)** 
+
+1. Navigasi Otomatis Sesuai Role: Mengarahkan tampilan web otomatis setelah login berdasarkan peran (EMPLOYEE_OFFICE, EMPLOYEE_SALES, atau HR_ADMIN). 
+
+2. Cegah Kecurangan Lokasi & Foto: Mendeteksi indikasi Fake GPS lewat validasi heuristik berlapis di server, melarang upload foto galeri (wajib kamera langsung WebRTC), dan memberi watermark di server. 
+
+3. Kemudahan Kunjungan Sales: Memudahkan sales memilih toko terdekat, pintasan 5 toko terakhir ('Recently Visited Outlets'), atau mengajukan toko baru (NOO) dengan kunci GPS, melakukan Visit In berbasis GPS plus 1x foto selfie kamera langsung, serta menyelesaikan Visit Out dengan laporan catatan singkat tanpa foto. 
+
+4. Pengelolaan Master Data Terpusat: Menyediakan menu Tambah / Edit / Nonaktifkan bagi HR untuk Karyawan, Shift Kerja, Lokasi Kantor (beserta zona waktu), dan Daftar Toko. 
+
+5. Rekap, Audit Trail & Laporan Siap Pakai: Menyediakan tabel rekap absensi harian (termasuk pantauan terlambat/alpa) dan rincian kunjungan toko sales lengkap dengan jejak audit dan fitur ekspor Excel/CSV. 
+
+6. Pengajuan Cuti, Izin, Sakit & Dinas Luar Mandiri (ESS): Menyediakan pengajuan cuti tahunan (hitung hari kerja efektif, 
+
+prorata, dan potongan Cuti Bersama), izin (termasuk H-2 susulan), sakit (wajib SKD & H-2 susulan), serta DINAS_LUAR terjadwal lengkap dengan antrean approval HR dan ekspor CSV. 
+
+# **3. User Stories (Alur Fitur per Pengguna)** 
+
+## **A. Fondasi, Keamanan & Login (Untuk Semua Pengguna)** 
+
+### **US-001: Skema Database & Model Data Lengkap** 
+
+Tujuan User: Sebagai developer, saya menyiapkan database relasional yang memisahkan data Masuk dan Pulang secara jelas, menyimpan bukti teknis, mendeteksi anomali, mengelola saldo cuti, dan mencatat jejak audit HR. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Total ada 14 tabel utama agar data absen kantor, master shift beserta pola jadwal kerja mingguan tetap (Senin–Minggu) dan jadwal tanggalnya, kunjungan sales, cuti/izin/sakit/dinas luar beserta saldo & rincian tanggalnya, hari libur, pengaturan mapping kode Talenta, log verifikasi HR, dan log audit perubahan data master rapi terpisah. Divisi produksi menggunakan mesin fingerprint terpisah dan tidak dimasukkan ke web maupun Talenta. 
+
+• 1. Tabel users (Data Akun & Karyawan): Menyimpan id, nik, email, name, password_hash, must_change_password (BOOLEAN DEFAULT false, otomatis true setelah Reset Password agar wajib diganti saat login pertama), role (EMPLOYEE_OFFICE, EMPLOYEE_SALES, HR_ADMIN), office_location_id (wajib diisi 
+
+untuk seluruh role termasuk EMPLOYEE_OFFICE, EMPLOYEE_SALES sebagai cabang induk/homebase filter rekap & zona waktu, serta HR_ADMIN yang ikut absen), default_shift_pattern_id (FK → shift_patterns.id, nullable untuk EMPLOYEE_SALES berjam fleksibel), join_date (DATE, acuan prorata cuti & kelayakan potongan cuti bersama), reference_photo_url (foto profil asli), consent_accepted_at (persetujuan UU PDP), is_active (soft delete), serta kolom opsional profil Talenta: organization (VARCHAR(150), nullable), job_position (VARCHAR(150), nullable), job_level (VARCHAR(100), nullable), dan employment_status (VARCHAR(50), nullable). Status rate limiting dan penguncian percobaan login dikelola di Laravel Cache/ Redis per kombinasi (NIK/Email + IP) dan user_lock_version (tidak disimpan di tabel users). 
+
+• 2. Tabel shifts (Master Shift): Menyimpan id, code (kode unik dinamis yang bebas ditambah/diedit/dinonaktifkan HR lewat US-007; seed awal memakai JWD Jakarta, SWD/SWE Surabaya, BWD/BWE Bali, PWD/PWE Staf Pasuruan, dan MKT Sales), name, start_time, end_time, grace_period_minutes (INTEGER DEFAULT 10, dapat diubah per shift oleh HR), auto_close_hours (INTEGER DEFAULT 5, batas jam tunggu setelah end_time sebelum lupa ClockOut ditutup otomatis, dapat diubah HR di US-007), dan is_active. 
+
+• 3. Tabel shift_patterns (Template Pola Jadwal Kerja Mingguan): Menyimpan template pola jadwal hari Senin–Minggu yang dipakai ulang untuk staf kantor agar HR tidak menginput satu per satu: id, name (misal 'Office Jakarta 5 Hari' atau 'Office Cabang 6 Hari'), mon_shift_id, tue_shift_id, wed_shift_id, thu_shift_id, fri_shift_id, sat_shift_id, sun_shift_id (masing-masing FK → shifts.id, nullable jika hari tersebut libur/OFF), dan is_active. 
+
+• 4. Tabel user_shift_schedules (Jadwal Harian per Tanggal): Menyimpan jadwal kerja aktual per karyawan per tanggal hingga 3 bulan (90 hari) ke depan: id, user_id (FK → users.id), work_date (DATE), shift_id (FK → shifts.id, nullable jika is_day_off = true), is_day_off (BOOLEAN default false), source (ENUM: PATTERN, MANUAL_OVERRIDE), created_by (FK → users.id), dan timestamps. Menggunakan constraint UNIQUE(user_id, work_date) agar 1 karyawan memiliki tepat 1 jadwal aktif per tanggal. 
+
+• 5. Tabel locations (Kantor & Toko): Menyimpan titik lokasi tipe OFFICE dan OUTLET: id, code (VARCHAR(50), UNIQUE, nullable sementara untuk pengajuan toko NOO sebelum dilengkapi HR), name, type, address, latitude, longitude, radius_m, timezone (Asia/ Jakarta untuk WIB atau Asia/Makassar untuk WITA), work_days (JSON array hari kerja: [1..5] atau [1..6]; 1=Senin..7=Minggu), status (ACTIVE, PENDING_VERIFICATION, INACTIVE), reject_reason (TEXT, nullable; wajib diisi HR_ADMIN saat menolak pengajuan toko NOO menjadi INACTIVE), created_by (FK → users.id, nullable dengan ON DELETE SET NULL guna mencegah circular foreign key terhadap users.office_location_id saat seeding instalasi awal). 
+
+• 6. Tabel attendance_logs (Absensi Harian Kantor & HR): 
+
+Identitas, Sumber Data, Shift & Aturan Unik: id, user_id, location_id, shift_id (snapshot dari user_shift_schedules.shift_id saat Clock-In agar laporan historis tetap utuh walau jadwal berubah), schedule_start_time (TIME, nullable; salinan snapshot shift.start_time saat Clock-In), schedule_end_time (TIME, nullable; salinan snapshot shift.end_time saat Clock-In), grace_period_minutes (INTEGER, nullable; snapshot toleransi telat saat Clock-In), auto_close_hours (INTEGER, nullable; snapshot batas auto-close saat Clock-In), office_lat (DECIMAL(10,7), nullable; snapshot locations.latitude cabang saat Clock-In), office_lng (DECIMAL(10,7), nullable; snapshot locations.longitude cabang saat Clock-In), office_radius_m (INTEGER, nullable; snapshot locations.radius_m cabang saat Clock-In), leave_request_id (FK → leave_requests.id, nullable; terisi otomatis apabila Clock-In/Out dilakukan di bawah pengajuan DINAS_LUAR berstatus PENDING maupun APPROVED pada US-009), source (ENUM: APP, MANUAL_HR, default APP untuk membedakan absensi mandiri karyawan melalui aplikasi dari input manual darurat oleh HR di US-008), work_date (tanggal kerja lokal cabang pada zona waktu kantor), attempt_no (INTEGER default 1, urutan percobaan absen di work_date yang sama), is_active_attempt (bernilai 1 saat aktif dan NULL saat REJECTED). Menggunakan constraint UNIQUE(user_id, work_date, is_active_attempt) — atau Partial Unique Index UNIQUE(user_id, work_date) WHERE clock_in_status != 'REJECTED' jika memakai PostgreSQL — agar tetap mencegah double Clock-In namun 
+
+#### mengizinkan absen ulang setelah ditolak. 
+
+Kolom Clock-In (Masuk — seluruh kolom bukti teknis nullable di level database untuk mendukung baris source = MANUAL_HR, namun tetap wajib diisi oleh validasi backend pada jalur aplikasi source = APP): clock_in_at, clock_in_photo_url (nullable), clock_in_lat (nullable), clock_in_lng (nullable), clock_in_accuracy_m (nullable), clock_in_distance_m (nullable), clock_in_device_id (nullable), clock_in_ip (nullable), clock_in_user_agent (nullable), clock_in_notes (alasan jika luar radius/akurasi rendah/izin masuk siang, atau alasan dispensasi input manual HR), clock_in_idempotency_key (VARCHAR(36), UNIQUE, nullable), late_minutes. 
+
+Kolom Clock-Out (Pulang — seluruhnya nullable sebelum pulang maupun pada baris source = MANUAL_HR bila jam pulang belum/ tidak diisi): clock_out_at, clock_out_photo_url (nullable), clock_out_lat (nullable), clock_out_lng (nullable), clock_out_accuracy_m (nullable), clock_out_distance_m (nullable), clock_out_device_id (nullable), clock_out_ip (nullable), clock_out_user_agent (nullable), clock_out_notes (alasan pulang cepat/luar radius), clock_out_idempotency_key (VARCHAR(36), UNIQUE, nullable), early_leave_minutes. 
+
+Status & Audit (Dipisah per Fase Clock-In & Clock-Out): Fase masuk: clock_in_status (ENUM: AUTO_APPROVED, PENDING_REVIEW, APPROVED, REJECTED), clock_in_anomaly_flags (JSON array), clock_in_reviewed_by, clock_in_reviewed_at, clock_in_reject_reason. Fase pulang: clock_out_status (ENUM sama, nullable sebelum pulang), clock_out_anomaly_flags (JSON array), clock_out_reviewed_by, clock_out_reviewed_at, clock_out_reject_reason. Daftar lengkap flag resmi attendance_logs: ["OUT_OF_RADIUS", 
+
+"UNCERTAIN_ACCURACY", "LOW_ACCURACY", "SHARED_DEVICE", "EARLY_LEAVE", "MISSED_CLOCK_OUT", "OFFSITE_DUTY", "OFF_DAY_ATTENDANCE", "IMPOSSIBLE_TRAVEL", "REPEATED_COORDS", "CONSTANT_ACCURACY", "STALE_TIMESTAMP"]. 
+
+• 7. Tabel sales_visits (Kunjungan Toko Tim Sales): 
+
+Identitas & Sumber Kunjungan: id, user_id, outlet_location_id, source (ENUM: APP, MANUAL_HR, default APP untuk membedakan kunjungan mandiri sales melalui aplikasi dari input manual darurat oleh HR di US-008), visit_date (DATE, disimpan dalam format ISO YYYY-MM-DD di database dan ditampilkan sebagai DD-MM-YYYY di UI/laporan; dikonversi dari visit_in_at UTC menggunakan zona waktu cabang induk/homebase sales locations.timezone milik users.office_location_id, sedangkan tampilan jam kunjungan lokal & watermark memakai zona waktu toko outlet_location_id). 
+
+Kolom Visit In (Tiba di Toko — seluruh kolom bukti teknis nullable di level database untuk mendukung baris source = MANUAL_HR, namun pada jalur aplikasi source = APP wajib mengisi foto selfie kamera langsung, koordinat GPS, akurasi, jarak, dan device_id): visit_in_at, visit_in_photo_url (nullable di DB; wajib 1x foto selfie kamera langsung pada source = APP untuk seluruh Visit In), visit_in_lat (nullable), visit_in_lng (nullable), visit_in_accuracy_m (nullable), visit_in_distance_m (nullable), visit_in_device_id (nullable), visit_in_ip (nullable), visit_in_user_agent (nullable), visit_in_notes (alasan wajib saat akurasi buruk, agak meleset, atau kunjungan toko NOO; atau alasan dispensasi input manual HR), cancel_reason (VARCHAR(255), nullable; wajib diisi bila visit_status = CANCELLED dalam batas ≤ 5 menit), visit_in_idempotency_key (VARCHAR(36), UNIQUE, nullable). 
+
+Kolom Visit Out (Selesai dari Toko — tanpa foto; seluruh kolom Visit Out nullable hingga Visit Out dilakukan maupun pada baris source = MANUAL_HR): visit_out_at, duration_minutes, activity_category_id (FK → activity_categories.id, nullable saat Visit In / AUTO_CLOSED; wajib saat Visit Out COMPLETED maupun MANUAL_HR), visit_notes (laporan singkat kunjungan sekaligus keterangan/alasan tambahan bila Visit Out di luar radius), visit_out_lat (nullable), visit_out_lng (nullable), visit_out_accuracy_m (nullable), visit_out_distance_m (nullable), visit_out_device_id (nullable), visit_out_ip (nullable), visit_out_user_agent (nullable), visit_out_idempotency_key (VARCHAR(36), UNIQUE, nullable). 
+
+Status Perjalanan, Verifikasi & Audit (Dipisah): visit_status (ENUM siklus kunjungan: IN_PROGRESS, COMPLETED, CANCELLED, AUTO_CLOSED untuk penutupan scheduler 23:59), 
+
+verification_status (ENUM verifikasi HR: AUTO_APPROVED, PENDING_REVIEW, APPROVED, REJECTED), anomaly_flags (JSON array dengan daftar resmi: ["OUT_OF_RADIUS", "OUT_OF_RADIUS_VISIT_OUT", "UNVERIFIED_OUTLET", "UNCERTAIN_ACCURACY", "LOW_ACCURACY", "SHARED_DEVICE", "SHORT_DURATION", "MISSED_VISIT_OUT", "IMPOSSIBLE_TRAVEL", "REPEATED_COORDS", "CONSTANT_ACCURACY", "STALE_TIMESTAMP"]), reviewed_by, reviewed_at, reject_reason. 
+
+• 8. Tabel leave_requests (Header Pengajuan Cuti, Izin, Sakit & Dinas Luar Terjadwal): id, user_id (FK users.id), type (ENUM: CUTI, SAKIT, IZIN, DINAS_LUAR), start_date, end_date, total_days (DECIMAL(4,1) total hari kerja efektif yang masih aktif, tidak termasuk tanggal yang dibatalkan), destination_location (VARCHAR(255), nullable; wajib diisi jika type = DINAS_LUAR untuk mencatat kota/lokasi tujuan tugas), scheduled_start_time (TIME, nullable; wajib diisi jika type = DINAS_LUAR sebagai pengganti shift.start_time untuk acuan keterlambatan di lokasi dinas, misal 09:00:00), reason, attachment_path (file SKD wajib untuk SAKIT, atau surat tugas/bukti pendukung opsional untuk IZIN/DINAS_LUAR, nullable), status (ENUM: PENDING, APPROVED, REJECTED, PARTIALLY_CANCELLED, CANCELLED; default PENDING), reviewed_by (FK users.id, nullable), reviewed_at (nullable), reject_reason (nullable), timestamps. 
+
+• 8A. Tabel leave_request_days (Rincian Pengajuan Cuti/Izin/Sakit per Tanggal): Menyimpan rincian harian untuk setiap pengajuan multi-hari maupun 1 hari: id, leave_request_id (FK → leave_requests.id ON DELETE CASCADE), user_id (FK → users.id), leave_date (DATE), day_value (DECIMAL(3,1): 1.0 untuk hari kerja efektif, 0.0 untuk hari libur atau jadwal OFF), status (ENUM: PENDING, APPROVED, REJECTED, CANCELLED; default PENDING), cancelled_by (FK → users.id, nullable), cancelled_at (nullable), cancel_reason (nullable), dan timestamps. Menggunakan constraint UNIQUE(leave_request_id, leave_date) agar setiap tanggal dalam satu pengajuan tercatat unik dan dapat dibatalkan secara satuan/parsial. 
+
+• 9. Tabel leave_balances (Saldo Cuti Tahunan per Karyawan per 
+
+#### Tahun): 
+
+Struktur & Constraint: UNIQUE(user_id, year) berisi id, user_id (FK users.id), year (INTEGER, tahun kalender), base_quota (DECIMAL(4,1) default 12; bernilai 0 jika masa kerja < 1 tahun), prorated_deduction (DECIMAL(4,1) default 0, potongan bulan yang telah lewat pada tahun karyawan genap 1 tahun), collective_leave_deduction (DECIMAL(4,1) default 0, potongan Cuti Bersama Idul Fitri khusus masa kerja ≥ 1 tahun), used_days (DECIMAL(4,1) default 0, cuti APPROVED), pending_days (DECIMAL(4,1) default 0, mengunci kuota saat PENDING), adjustment_days (DECIMAL(4,1) default 0, koreksi manual HR), timestamps. 
+
+Rumus Sisa Saldo: available_balance = base_quota - prorated_deduction - collective_leave_deduction - used_days - pending_days + adjustment_days (kolom bertanda/signed, mengizinkan nilai minus jika terjadi override kebutuhan mendesak sebelum Cuti Bersama). 
+
+• 10 & 11. Tabel activity_categories & holidays: activity_categories menyimpan id, name, exempt_short_duration (BOOLEAN, menandai kategori yang dikecualikan dari aturan kunjungan singkat < 3 menit seperti 'Toko Tutup'), dan is_active (diatur HR tanpa ubah kode). holidays menyimpan daftar libur dengan holiday_date, location_id (nullable, bedakan libur nasional vs lokal Bali; pencegahan duplikat tanggal merah nasional maupun lokal dilakukan melalui validasi unik server sebelum simpan — atau kolom turunan/reguler location_scope_id = COALESCE(location_id, 0) di MySQL — agar migrasi standar tetap kompatibel pada SQLite testing maupun MySQL), serta holiday_type (ENUM: NATIONAL, LOCAL, COLLECTIVE_LEAVE untuk membedakan tanggal merah biasa yang tidak memotong cuti vs Cuti Bersama Idul Fitri yang otomatis memotong saldo cuti tahunan). 
+
+• 12. Tabel audit_logs Menyimpan id, actor_id (FK → users.id), entity (locations, shifts, shift_patterns, user_shift_schedules, holidays, users, attendance_logs, sales_visits, leave_balances, leave_requests, activity_categories, talenta_mappings), record_id, action (CREATE, UPDATE, SOFT_DELETE, RESET_PASSWORD, UNLOCK_ACCOUNT, CORRECT_STATUS, MANUAL_ATTENDANCE, 
+
+BULK_IMPORT, CANCEL_LEAVE, OVERRIDE_LIMIT, EXPORT_ATTENDANCE), old_values (JSON, nullable), new_values (JSON, nullable), reason (nullable), prev_hash (VARCHAR(64), nullable pada baris pertama; hash baris sebelumnya untuk rantai integritas), row_hash (VARCHAR(64), SHA-256 dari payload baris + prev_hash), dan created_at untuk merekam mutasi data master, perubahan mapping kode Talenta, perubahan kategori aktivitas, penyesuaian/impor saldo cuti, override batas cuti 2 hari/bulan, pembatalan penuh maupun parsial cuti/izin/dinas luar disetujui, unlock akun, reset password, koreksi status REJECTED ke APPROVED, input absen manual darurat oleh HR, serta pengunduhan file ekspor laporan kehadiran. 
+
+• 13. Tabel talenta_mappings (Konfigurasi Mapping Ekspor Mekari Talenta): Menyimpan id, mapping_key (VARCHAR(100), UNIQUE; mencakup attendance_present, attendance_absent, timeoff_annual, timeoff_collective, timeoff_collective_unpaid, timeoff_izin, timeoff_sakit, serta parameter opsi ekspor use_offsite_schedule_for_talenta ['true'/'false'] dan export_offday_overtime_to_talenta ['true'/'false']), mapping_value (VARCHAR(100)), description (VARCHAR(255), nullable), updated_by (FK → users.id, nullable), dan timestamps agar seluruh konfigurasi dan opsi ekspor /admin/talenta-mapping tersimpan dinamis di database. 
+
+• Verifikasi Teknis: Typecheck/lint passes. 
+
+### **US-002: Login, Keamanan Akun & Persetujuan Data Pribadi (UU PDP)** 
+
+Tujuan User: Sebagai pengguna, saya ingin login dengan aman, menyetujui penggunaan kamera/lokasi sesuai aturan privasi, dan langsung masuk ke halaman kerja sesuai peran. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Login pakai NIK/Email, ada pengaman anti-brute-force berbasis Cache/Redis dengan versi kunci (lock_version), wajib klik setuju UU PDP saat pertama kali, lalu otomatis diarahkan sesuai 
+
+role (dengan pemisahan tegas menu absensi kantor vs kunjungan sales). 
+
+- Login & Rate Limiting (Cache/Redis): Login memakai NIK/Email + Password. Penghitung percobaan gagal disimpan di Laravel Cache/Redis (bukan di kolom tabel users): 
+
+1. Kunci per (NIK/Email + IP) Berversi: Jika gagal login 5 kali berturut-turut, kunci 15 menit diterapkan pada cache key login_fail: {nik_or_email}:{ip}:v{lock_version} (dengan lock_version disimpan di cache user_lock_version:{user_id} default 0) sehingga karyawan asli di IP/perangkat lain tidak ikut terkunci oleh pihak luar. Login sukses menghapus cache key login_fail untuk kombinasi tersebut. 
+
+2. Kunci per IP (Anti Brute-Force): Batas maksimal 30 kali gagal login per 15 menit per IP (login_ip:{ip}) agar aman untuk jaringan Wi-Fi kantor bersama. 
+
+3. Pembukaan Kunci oleh HR (Unlock Akun): HR_ADMIN dapat membuka kunci percobaan login karyawan di US-007 dengan menaikkan nilai user_lock_version:{user_id} (+1) di cache sehingga seluruh blokir (NIK/Email + IP) lama langsung gugur tanpa perlu mengetahui alamat IP karyawan. 
+
+- Manajemen Password: Ganti password mandiri di menu profil; jika lupa password, minta Reset Password melalui HR Admin. Jika akun berstatus must_change_password = true (pasca-reset oleh HR), sistem memaksa karyawan mengganti password baru pada login pertama sebelum dapat mengakses menu utama. 
+
+- Persetujuan UU PDP (Consent): Saat login pertama kali, tampilkan layar persetujuan penggunaan data lokasi GPS, foto kamera, serta lampiran dokumen medis/SKD (bila mengajukan Sakit di US-009) untuk keperluan absensi & HR perusahaan dengan tombol 'Setuju' (mencatat consent_accepted_at) dan tombol 'Tolak'. Jika memilih 'Tolak', munculkan notifikasi 'Harap setujui akses kamera dan lokasi GPS jika ingin absen' lalu otomatis logout. 
+
+• Redirect Otomatis & Pemisahan Akses Menu Setelah Login: EMPLOYEE_OFFICE → /attendance/office (khusus absen kantor 
+
+Clock-In/Out; dilarang/tidak memiliki akses ke rute kunjungan toko /attendance/sales, serta memiliki menu navigasi 'Cuti, Izin & Dinas' → /leave) 
+
+EMPLOYEE_SALES → /attendance/sales (khusus kunjungan toko Visit In/Out; dilarang/tidak memiliki akses ke rute absen kantor / attendance/office, serta memiliki menu navigasi 'Cuti & Izin' → / leave) 
+
+HR_ADMIN → /admin/dashboard (dilengkapi menu navigasi 'Absen Saya' ke /attendance/office untuk absen kantor pribadi, 'Cuti, Izin & Dinas' ke /leave untuk pengajuan pribadi, serta 'Persetujuan Cuti/ Izin' ke /admin/leaves untuk memproses pengajuan karyawan dan sesama HR_ADMIN lain; tidak memiliki akses ke /attendance/sales). 
+
+• Pengujian: Typecheck/lint passes & diuji menggunakan mock browser. 
+
+### **US-003: Pengecekan GPS, Kamera Langsung & Watermark Server** 
+
+Tujuan User: Sebagai karyawan, saya ingin aplikasi memeriksa kualitas GPS dan mengambil foto langsung dari kamera tanpa mengunci mati akses saya jika sinyal di dalam gedung sedang buruk. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Buka di browser asli (bukan WA/Line), GPS lemah tetap boleh absen dengan syarat isi alasan (masuk review HR), seluruh transaksi memakai token sesi GPS server, foto wajib kamera langsung (anti galeri) lalu di-watermark di server. 
+
+- Deteksi In-App Browser: Jika dibuka dari browser bawaan WhatsApp/Line, munculkan instruksi untuk membuka link di Chrome (Android) atau Safari (iOS). 
+
+- Token Sesi GPS Sekali Pakai & Aturan Akurasi GPS (Tidak Mengunci Mati di Dalam Gedung): 
+
+Token Sesi GPS Server (gps_session_token): Setiap kali aplikasi membuka halaman absen/kunjungan, menekan 'Muat Ulang GPS', maupun tepat saat menekan tombol submit pada seluruh alur transaksi (Clock-In, Clock-Out, Visit In, dan Visit Out tanpa foto), browser wajib memanggil navigator.geolocation.getCurrentPosition dengan opsi maximumAge: 0 (anti-cache) dan meminta token sesi GPS sekali pakai (gps_session_token) yang diterbitkan server bersama user_id dan issued_at (disimpan di Redis/Cache server dengan TTL 300 detik). Seluruh pengiriman absen kantor maupun kunjungan sales wajib menyertakan gps_session_token yang valid. Jeda 120–300 detik sejak issued_at tetap diterima sebagai PENDING_REVIEW dengan flag STALE_TIMESTAMP (satu-satunya acuan pengecekan jeda waktu di server bersama FR-3), sedangkan lebih dari 300 detik, token milik user lain, atau token yang sudah terpakai (single-use) ditolak server agar pengguna memuat ulang GPS. 
+
+GPS Mati / Izin Ditolak: Tombol absen terkunci dan muncul panduan mengaktifkan GPS. 
+
+Akurasi Buruk (accuracy_m lebih dari 100 atau accuracy_m lebih dari radius_m) atau Sesi GPS Tertunda (jeda penerimaan token di server lebih dari 120 detik akibat keterlambatan jaringan saat submit): Tombol tidak dikunci mati. Muncul peringatan 'Sinyal GPS kurang akurat' + tombol 'Muat Ulang GPS'. Jika akurasi tetap buruk (misal di dalam gedung kantor/ruang tertutup), karyawan tetap boleh absen dengan wajib isi Alasan dan status otomatis menjadi PENDING_REVIEW. 
+
+• Kamera Langsung & Token Sekali Pakai (Anti Galeri UI + API): Di sisi tampilan, kamera dibuka lewat navigator.mediaDevices.getUserMedia tanpa elemen <input type='file'>. Di sisi server, setiap kali kamera dibuka aplikasi wajib meminta token kamera sekali pakai (camera_token) yang diterbitkan server bersama user_id dan waktu terbit issued_at (disimpan di Redis/Cache server dengan TTL 300 detik). Pengiriman absen kantor (Clock-In/Out) maupun seluruh Visit In sales tanpa token tersebut — termasuk token sudah pernah dipakai (single-use), milik user lain, atau kedaluwarsa (> 300 detik / 5 menit) — langsung ditolak server, disertai validasi format/MIME 
+
+file gambar asli. Khusus Visit Out sales berjalan tanpa foto dan tanpa camera_token (cukup gps_session_token). Catatan batasan teknis: mekanisme ini mencegah upload foto galeri melalui UI maupun pengiriman langsung ke API tanpa sesi kamera, namun belum dapat mencegah mutlak kamera virtual atau memotret ulang foto dari layar perangkat lain sehingga perbandingan foto side-byside oleh HR_ADMIN tetap menjadi kontrol utama. 
+
+- Kompresi, Watermark Server & Kebenaran Data: Foto dikompresi < 300 KB lalu dikirim ke server. Waktu resmi server, koordinat, jarak, dan akurasi disimpan sebagai kolom terpisah di database (sumber kebenaran utama), sedangkan watermark pada gambar dibuat oleh server hanya sebagai tampilan bukti visual. 
+
+- Pengujian: Typecheck/lint passes & diuji dengan mock geolocation/kamera serta di HP Android/iOS asli. 
+
+## **B. Alur Staf Kantor (EMPLOYEE_OFFICE & HR_ADMIN yang Ikut Absen)** 
+
+### **US-004: Absen Masuk (Clock-In) & Pulang (Clock-Out) Kantor** 
+
+Tujuan User: Sebagai staf kantor, saya ingin melakukan absen masuk dan pulang sesuai jadwal shift dengan foto selfie. Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Absen terikat jam server & shift, terkunci jika sedang cuti disetujui, boleh absen ulang jika ditolak hari ini, telat ditoleransi 10 menit, dan izin setengah hari cukup lewat catatan Clock-In/Out. 
+
+- Tampilan Jam Server, Shift, Fallback Jadwal & Penentuan work_date: Menampilkan jam server real-time (WIB/WITA) berdasarkan locations.timezone (diambil dari cabang kantor karyawan melalui users.office_location_id pada tabel locations 
+
+bertipe OFFICE) dan jadwal shift aktif dari user_shift_schedules berdasarkan (user_id, work_date) (misal Staf JWD/SWD/BWD/PWD 08:00–16:00 Senin–Jumat, Jakarta Sabtu libur sedangkan SWE/ BWE/PWE Sabtu 08:00–13:00). 
+
+On-the-Fly Schedule Fallback (Anti Gagal Absen jika Scheduler Terlewat): Apabila karyawan memiliki pola jadwal mingguan (users.default_shift_pattern_id != NULL) tetapi baris user_shift_schedules untuk tanggal target belum terbuat di database (misal akibat kegagalan/keterlambatan scheduler), server wajib langsung mengambil shift_id dari template shift_patterns sesuai hari (Senin–Minggu) tanggal target, menyimpannya ke user_shift_schedules (source = PATTERN, atau is_day_off = true jika NULL), dan membuka tombol Clock-In secara normal. 
+
+Jendela Clock-In normal dibuka mulai 2 jam sebelum shift.start_time dan ditutup tepat sebelum effective_end_time waktu lokasi kantor (yaitu shift.end_time — atau attendance_logs.schedule_end_time setelah Clock-In — pada hari kerja normal, atau MAX(shift.end_time, 
+
+leave_requests.scheduled_start_time + durasi_shift) apabila memiliki pengajuan DINAS_LUAR berstatus PENDING maupun APPROVED pada hari-H dengan scheduled_start_time, sehingga agenda dinas sore tetap tercakup; bila shift_id kosong saat DINAS_LUAR, dipakai leave_requests.scheduled_start_time + 8 jam). Batas tutup tersebut hanya untuk Clock-In pertama, sedangkan Clock-Out tetap terbuka hingga effective_end_time + auto_close_hours (default 5 jam, maksimal pukul 23:59 atau sesuai konfigurasi HR). Clock-In di luar jendela tersebut dinonaktifkan/ditolak server. Penentuan work_date saat Clock-In mengikuti urutan: (0) khusus absen ulang setelah penolakan HR (attempt_no > 1), cari langsung baris attendance_logs terakhir berstatus clock_in_status = 'REJECTED' dengan clock_out_at IS NULL pada work_date = D selama waktu server masih sebelum effective_end_time (atau sebelum pukul 23:59 jika shift_id kosong dan tanpa DINAS_LUAR); (1) jika bukan absen ulang, periksa jadwal tanggal berjalan (D waktu lokal cabang) dalam jendela [MIN(shift.start_time, 
+
+leave_requests.scheduled_start_time) - 2 jam jika DINAS_LUAR PENDING/APPROVED, effective_end_time) dan ikat ke work_date = D; (2) pengguna dengan role EMPLOYEE_OFFICE dan HR_ADMIN 
+
+wajib memiliki default_shift_pattern_id (NOT NULL saat simpan user). Kondisi shift_id = NULL hanya terjadi apabila pada tanggal tersebut jadwal karyawan berstatus is_day_off = true atau bertepatan dengan hari libur. Untuk kondisi lembur atau masuk pengganti pada hari libur/OFF tersebut, jendela Clock-In dibuka sepanjang 00:00–23:59 zona waktu kantor dengan late_minutes = 0, dan baik fase Clock-In maupun Clock-Out otomatis masuk antrean PENDING_REVIEW dengan flag OFF_DAY_ATTENDANCE agar HR memverifikasi penugasan serta durasi kerja lemburnya. 
+
+• Kunci Otomatis Saat Cuti/Izin/Sakit Disetujui vs Mode DINAS_LUAR Disetujui: 
+
+Kunci Saat CUTI/IZIN/SAKIT (APPROVED): Jika pada work_date berjalan karyawan punya baris di leave_request_days dengan status = APPROVED pada leave_date = work_date untuk jenis CUTI, IZIN, atau SAKIT, tombol Clock-In otomatis dinonaktifkan dengan pesan: 'Anda tidak dapat absen karena sedang dalam status Cuti/ Izin/Sakit yang telah disetujui hari ini'. 
+
+Buka Blokir Radius Kantor Saat DINAS_LUAR (APPROVED / PENDING Hari-H): Sebaliknya, apabila pada work_date berjalan karyawan memiliki pengajuan DINAS_LUAR berstatus APPROVED — atau masih PENDING hingga hari-H per US-009 — tombol ClockIn dan Clock-Out tetap aktif dan bebas dari blokir jarak kantor (> max(200m, R) tidak diblokir) sehingga karyawan dapat melakukan absen GPS + foto selfie langsung di lokasi/kota tujuan dinas, serta server otomatis menautkan attendance_logs.leave_request_id ke pengajuan dinas luar tersebut. 
+
+• Pencegahan Clock-In Ganda, Transaksi Atomik, Validasi Jalur Aplikasi & Buka Kunci Saat REJECTED: Maksimal 1 absensi aktif per work_date. Tombol Clock-In nonaktif selama clock_in_status bernilai AUTO_APPROVED, PENDING_REVIEW, atau APPROVED. Jika clock_in_status ditolak (REJECTED), tombol Clock-Out disembunyikan di UI dan ditolak server (HTTP 422) pada baris yang ditolak tersebut, dan kunci otomatis terbuka untuk absen ulang (attempt_no + 1) selama waktu server masih sebelum effective_end_time waktu kantor (atau sebelum pukul 23:59 jika is_day_off = true / hari libur dengan shift_id kosong dan tanpa DINAS_LUAR). Perhitungan late_minutes pada percobaan ulang 
+
+dihitung murni dari clock_in_at percobaan ulang tersebut terhadap jam acuan masuk + grace_period_minutes (tidak mewarisi waktu percobaan yang ditolak). Apabila penolakan HR baru terjadi setelah melewati effective_end_time (saat jam kerja shift sudah berakhir), tombol absen ulang tidak dibuka melainkan diproses melalui fitur Koreksi Status (REJECTED → APPROVED) dan penyesuaian jam masuk/pulang oleh HR pada US-008 agar jam kehadiran pagi tetap akurat. 
+
+• Toleransi Keterlambatan (Default 10 Menit Resmi HR & Acuan DINAS_LUAR): Menggunakan nilai snapshot attendance_logs.grace_period_minutes yang disalin dari shifts.grace_period_minutes saat Clock-In (nilai default kolom = 10 menit, dan dapat disesuaikan per shift oleh HR di US-007). Acuan jam masuk adalah schedule_start_time (salinan shift.start_time), kecuali apabila karyawan memiliki pengajuan DINAS_LUAR berstatus PENDING atau APPROVED pada work_date tersebut maka acuan jam masuk menggunakan leave_requests.scheduled_start_time (contoh: janji temu klien pukul 09:00 + toleransi 10 menit = batas 09:10). Jika clock_in_at melewati batas tersebut, sistem mencatat late_minutes dihitung dari jam acuan masuk resmi. 
+
+- Validasi Lokasi Clock-In & Clock-Out (Termasuk Aturan Tugas Luar Hari-H & Dinas Terjadwal): 
+
+Aturan Saat Clock-In (Absen Masuk Normal Tanpa DINAS_LUAR): 
+
+1. Sah Otomatis (AUTO_APPROVED): Jarak d ≤ R DAN akurasi GPS a ≤ R (serta a ≤ 100m) tanpa flag anomali. 
+
+2. Perlu Tinjauan (PENDING_REVIEW): Jika di luar radius hingga batas blokir (R < d ≤ max(200m, R), flag OUT_OF_RADIUS), jika d ≤ R namun a > R (flag UNCERTAIN_ACCURACY), ATAU jika d ≤ R dan a ≤ R namun a > 100m (flag LOW_ACCURACY) → wajib isi Alasan. 
+
+3. Ditolak / Diblokir Keras (d > max(200m, R)): Sistem menolak keras Clock-In kantor bila jarak melebihi 200m (atau radius R jika R > 200m) untuk mencegah absen masuk dari rumah (kecuali terdapat pengajuan DINAS_LUAR APPROVED atau PENDING hari-H sesuai US-009). 
+
+Aturan Tugas Luar Mendadak (Hari-H): Tidak ada mode Clock-In dinas mendadak di luar kantor; apabila staf mendapat tugas luar mendadak pada hari-H, staf wajib datang dan Clock-In di kantor terlebih dahulu (lalu izin langsung ke HR/atasan). Untuk kondisi darurat ekstrem di mana staf benar-benar tidak sempat ke kantor, pencatatan dilakukan HR melalui fitur Input Absen Manual Darurat (US-008). 
+
+Aturan Saat Clock-In di Bawah DINAS_LUAR (APPROVED maupun PENDING Hari-H): Blokir jarak > max(200m, R) dan flag OUT_OF_RADIUS terhadap titik kantor tidak diberlakukan. Karyawan tetap wajib GPS aktif dan mengambil foto selfie kamera langsung di lokasi tujuan dinas; demi mencegah pengajuan dinas fiktif tanpa koordinat tujuan, seluruh Clock-In di bawah DINAS_LUAR otomatis berstatus PENDING_REVIEW dengan flag OFFSITE_DUTY agar HR wajib meninjau titik GPS di peta terhadap destination_location serta foto selfienya (wajib isi alasan clock_in_notes hanya apabila akurasi GPS buruk a > 100m atau terdeteksi anomali lain). 
+
+Aturan Saat Clock-Out (Absen Pulang): Validasi jarak GPS wajib menggunakan snapshot titik dan radius kantor yang dikunci saat Clock-In (attendance_logs.office_lat, office_lng, dan office_radius_m — bukan membaca ulang perubahan tabel locations di tengah hari), dan acuan jam selesai memakai effective_end_time (yaitu attendance_logs.schedule_end_time pada hari kerja normal, atau MAX(attendance_logs.schedule_end_time, leave_requests.scheduled_start_time + durasi_shift) saat DINAS_LUAR). 
+
+1. Sah Otomatis (AUTO_APPROVED): Jarak d ≤ R, akurasi GPS a ≤ R (serta a ≤ 100m), waktu pulang ≥ effective_end_time, bukan absen lembur/hari libur (is_day_off = false dengan shift_id aktif), dan tanpa flag anomali. 
+
+2. Perlu Tinjauan (PENDING_REVIEW): Berlaku pada salah satu kondisi berikut (Clock-Out tidak pernah diblokir berdasarkan jarak jauh agar karyawan tidak terjebak gagal absen pulang): (a) pulang di luar radius kantor tanpa DINAS_LUAR (flag OUT_OF_RADIUS) atau akurasi GPS rendah (UNCERTAIN_ACCURACY / LOW_ACCURACY) → wajib isi clock_out_notes; (b) pulang lebih 
+
+awal sebelum effective_end_time (flag EARLY_LEAVE) → wajib isi clock_out_notes; (c) absen lembur pada hari OFF/libur (flag OFF_DAY_ATTENDANCE) → wajib isi clock_out_notes; atau (d) Clock-Out di bawah pengajuan DINAS_LUAR (PENDING maupun APPROVED) → otomatis PENDING_REVIEW dengan flag OFFSITE_DUTY tanpa blokir jarak kantor, dan wajib isi clock_out_notes hanya apabila akurasi buruk (a > 100m), pulang sebelum effective_end_time (EARLY_LEAVE), atau terdeteksi anomali lain. 
+
+- Izin Setengah Hari (Half-Day Permission): Tidak ada form cuti 0.5 hari; ditangani langsung saat absen. Pulang siang: Clock-Out awal + isi clock_out_notes (clock_out_status = PENDING_REVIEW, flag EARLY_LEAVE tanpa menimpa clock_in_status pagi). Masuk siang: Clock-In saat tiba + isi clock_in_notes (clock_in_status = PENDING_REVIEW untuk persetujuan HR). 
+
+- Pulang Lebih Awal (Dinamis Mengikuti Shift Aktif & Dinas Luar): Karyawan yang Clock-Out sebelum effective_end_time (attendance_logs.schedule_end_time pada hari kerja normal, atau MAX(attendance_logs.schedule_end_time, leave_requests.scheduled_start_time + durasi_shift) saat DINAS_LUAR) wajib mengisi alasan (clock_out_notes) serta otomatis mendapat early_leave_minutes dan flag EARLY_LEAVE (PENDING_REVIEW untuk approval HR). Pada hari Sabtu cabang Surabaya (SWE), Bali (BWE), dan Pasuruan (PWE) yang masuk hingga 13:00 (end_time = 13:00; Jakarta hari Sabtu libur), pulang pukul 13:00 ke atas sah otomatis (AUTO_APPROVED, bukan EARLY_LEAVE) dan hanya ditandai EARLY_LEAVE jika pulang sebelum 13:00. Perbedaan durasi kerja 8 jam weekday vs 5 jam Sabtu mengikuti definisi Master Shift tanpa pengecualian hardcode per nama hari di kode aplikasi. 
+
+- Penanganan Lupa Clock-Out: Jika karyawan belum Clock-Out hingga melewati batas dinamis effective_end_time + attendance_logs.auto_close_hours (default 5 jam, disalin dari shifts.auto_close_hours saat Clock-In) berdasarkan zona waktu kantor (locations.timezone cabang induk karyawan: WIB/WITA), scheduler berkala server otomatis menutup sesi dengan clock_out_status = PENDING_REVIEW + clock_out_anomaly_flags 
+
+memuat MISSED_CLOCK_OUT (clock_out_at sementara NULL) agar karyawan tetap bisa Clock-In pada hari berikutnya, tanpa menimpa clock_in_status yang sudah sah. Batas relatif ini juga melindungi DINAS_LUAR sore dari penutupan prematur. Jika pada hari is_day_off = true / hari libur nilai attendance_logs.shift_id kosong dan tanpa DINAS_LUAR, batas tutup memakai pukul 23:59 zona waktu kantor pada work_date tersebut. Saat HR menyetujui fase pulang (APPROVED), form approval otomatis mengisi default clock_out_at = effective_end_time (waktu cabang pada tanggal shift tersebut, atau wajib diisi/disesuaikan HR jika shift_id kosong / lembur hari libur); jika ditolak (REJECTED), clock_out_at tetap NULL. 
+
+• Pengujian: Typecheck/lint passes & diuji pada skenario lintas zona waktu (WIB/WITA), Sabtu 13:00 cabang, DINAS_LUAR, dan absen ulang setelah REJECTED. 
+
+## **C. Alur Kunjungan Toko (EMPLOYEE_SALES Saja)** 
+
+### **US-005: Cari/Pilih Toko & Visit In saat Tiba di Toko** 
+
+Tujuan User: Sebagai tim sales (EMPLOYEE_SALES), saya ingin mencari atau memilih toko terdekat maupun mendaftarkan toko baru (NOO) dengan cepat dan melakukan Visit In saat tiba di toko. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Khusus akun EMPLOYEE_SALES (akun kantor/HR tidak dapat mengakses fitur ini); seluruh Visit In wajib 1x foto selfie kamera langsung (cukup foto + GPS jika sah di radius toko aktif, sedangkan jika meleset/akurasi buruk atau toko baru NOO wajib isi alasan tambahan); bisa pilih toko terdekat/riwayat atau ajukan NOO (anti-duplikat), dibatasi 1 kunjungan berjalan via lock database, diblokir keras jika d > max(200m, R), dan batal Visit In dibatasi alasan + kuota harian. 
+
+- Batasan Akses Role & Tanpa Clock-In Kantor: Menu dan endpoint /attendance/sales hanya dapat diakses oleh pengguna dengan role = EMPLOYEE_SALES (mengembalikan HTTP 403 Forbidden jika diakses oleh EMPLOYEE_OFFICE atau HR_ADMIN). Sales langsung memilih toko tanpa tombol Clock-In/Out kantor, dan jam mulai kerja hari itu tercatat otomatis dari visit_in_at paling awal yang aktif (visit_status != 'CANCELLED' dan verification_status != 'REJECTED'). 
+
+- Daftar Toko & Pencarian Terpadu (Privasi Koordinat Toko): Menyediakan 1 search bar terpadu (cari nama, kode, atau alamat toko) yang hasilnya otomatis diurutkan dari jarak GPS terdekat serta dibatasi maksimal 30 hasil terdekat per kueri, ditambah pintasan 'Recently Visited Outlets' yang menampilkan maksimal 5 toko berbeda yang terakhir dikunjungi sales tersebut. Tidak ada toko bebas ketik tanpa koordinat GPS. Demi keamanan dan mencegah penyedotan database titik outlet/bahan Fake GPS, API daftar dan pencarian toko tidak mengirim koordinat latitude/ longitude eksak outlet ke frontend melainkan hanya nama, kode, alamat, radius_m, status, dan jarak distance_m hasil hitung server. Memilih toko dari daftar mana pun (termasuk pintasan 5 toko terakhir) hanya mengisi pilihan toko; saat tekan Visit In tetap wajib melewati validasi jarak GPS (d ≤ R, R < d ≤ max(200m, R), atau blokir d > max(200m, R)). 
+
+• Ajukan Toko Baru (NOO) dengan Kunci GPS Presisi & Anti-Spam: Jika toko belum ada di daftar master (ACTIVE), sales menekan tombol 'Ajukan Toko Baru (NOO)', mengisi nama dan alamat toko (kode sementara dibuat otomatis sistem hingga dilengkapi HR saat verifikasi), serta mengunci koordinat GPS langsung di lokasi dengan syarat akurasi GPS wajib ≤ 50m (jika akurasi lebih dari 50m muncul peringatan agar mencari area terbuka dan menekan Muat Ulang GPS). Sebelum menyimpan NOO, server memeriksa apakah sudah ada toko (seluruh toko ACTIVE maupun seluruh pengajuan PENDING_VERIFICATION lintas sales) dalam radius 100m dari titik tersebut dan menampilkan peringatan daftar toko terdekat (hanya nama dan alamat toko tanpa koordinat eksak, serta tanpa membocorkan daftar toko PENDING_VERIFICATION milik sales lain di menu utama), serta membatasi pengajuan NOO maksimal 5 toko per hari per sales. Sistem menyimpan baris baru ke tabel locations 
+
+(type = OUTLET, status = PENDING_VERIFICATION, created_by = user_id, radius_m = 100 default, timezone mengikuti cabang sales atau pilihan WIB/WITA); toko berstatus PENDING_VERIFICATION hanya tampil pada daftar milik sales pengajunya (created_by = user_id) sampai HR memverifikasinya menjadi ACTIVE di US-007. Apabila HR menolak pengajuan NOO menjadi INACTIVE tepat saat kunjungan masih berjalan (IN_PROGRESS), sales tetap diizinkan menyelesaikan Visit Out dengan verification_status = PENDING_REVIEW (flag UNVERIFIED_OUTLET). 
+
+- Aturan Jarak, Akurasi & Toko NOO Saat Visit In (3 Kondisi — Terkunci Jika Cuti/Izin/Sakit Disetujui): Tombol Visit In otomatis nonaktif apabila user memiliki pengajuan Cuti/Izin/Sakit APPROVED pada tanggal berjalan (mengacu US-004 & US-009). 
+
+1. Sah di Lokasi (Toko ACTIVE, d ≤ R, a ≤ R, dan a ≤ 100m): Wajib ambil 1x foto selfie kamera langsung (visit_in_photo_url memakai camera_token + watermark server) dan kunci GPS, langsung tersimpan dengan visit_status = IN_PROGRESS serta verification_status = AUTO_APPROVED (tanpa perlu mengisi alasan). 
+
+2. Perlu Tinjauan HR (Wajib Foto Selfie & Alasan): Jika agak meleset atau akurasi buruk (R < d ≤ max(200m, R) [OUT_OF_RADIUS], atau d ≤ R namun a > R [UNCERTAIN_ACCURACY], atau d ≤ R dan a ≤ R namun a > 100m [LOW_ACCURACY]), ATAU jika berkunjung ke toko baru NOO berstatus PENDING_VERIFICATION (flag UNVERIFIED_OUTLET) → muncul tombol 'Perbarui GPS' (bila akurasi buruk), dan untuk lanjut Visit In wajib mengambil 1x foto selfie kamera langsung (visit_in_photo_url memakai camera_token US-003 + watermark server) DAN mengisi alasan (visit_in_notes), menghasilkan visit_status = IN_PROGRESS dan verification_status = PENDING_REVIEW. 
+
+- Batal Salah Pilih Toko (Batasan Kuota & Audit): Tombol 'Batalkan Visit In' aktif ≤ 5 menit setelah Visit In selama visit_status masih IN_PROGRESS dan belum Visit Out. Sales wajib mengisi alasan pembatalan (cancel_reason) dengan batas maksimal 3 kali pembatalan per hari (melebihi 3 kali tombol pembatalan terkunci untuk mencegah probing radius). Kunjungan tersimpan sebagai 
+
+visit_status = CANCELLED: dikecualikan dari ekspor File 2, perhitungan jam hadir, dan perhitungan IMPOSSIBLE_TRAVEL (per FR-3 agar salah pilih toko tidak memicu alarm palsu), namun tetap ikut dipantau oleh REPEATED_COORDS, SHARED_DEVICE, serta tercatat di ekspor audit internal File 3. 
+
+• Aturan 1 Kunjungan Berjalan (Lock Transaksi DB) & Lupa Visit Out: Sales hanya boleh memiliki tepat 1 kunjungan berstatus visit_status = IN_PROGRESS dalam satu waktu; validasi wajib dijalankan di dalam transaksi database (DB::transaction dengan lockForUpdate() pada baris user saat Visit In, atau ekuivalen partial unique index / kolom penjaga baris aktif) agar request paralel dari dua tab/perangkat tidak dapat membuat 2 baris IN_PROGRESS. Selama kunjungan Toko A masih berjalan, tombol Visit In di toko lain terkunci. Jika lupa Visit Out saat sudah berpindah ke Toko B pada hari yang sama, sales langsung menekan tombol Visit Out pada kartu kunjungan aktif Toko A (pilih kategori aktivitas dan isi catatan/alasan pada visit_notes, tanpa foto) — posisi di luar radius Toko A menyelesaikan visit_status = COMPLETED dan menetapkan verification_status = PENDING_REVIEW + flag OUT_OF_RADIUS_VISIT_OUT untuk dicek HR_ADMIN, dan setelah selesai tombol Visit In di Toko B langsung terbuka tanpa menunggu approval HR. Penutupan otomatis tengah malam (23:59) diselaraskan dengan zona waktu penghitung visit_date (locations.timezone cabang induk sales: WIB/WITA) oleh scheduler berkala server yang mengubah status menggantung menjadi visit_status = AUTO_CLOSED dan verification_status = PENDING_REVIEW + flag MISSED_VISIT_OUT (visit_out_at sementara NULL) agar sales tetap bisa Visit In keesokan harinya. Selain scheduler, server wajib melakukan pengecekan on-the-fly saat sales membuka halaman atau mengirim Visit In/Out: jika ditemukan kunjungan IN_PROGRESS dengan visit_date < tanggal hari ini (zona waktu cabang induk), sesi kemarin langsung ditutup otomatis sebagai AUTO_CLOSED (MISSED_VISIT_OUT) agar tidak terjadi kunjungan lintas hari bila scheduler sempat tertunda. Saat HR menyetujui (APPROVED), HR dapat mengisi visit_out_at berdasarkan keterangan sales untuk menghitung duration_minutes (tampil '-' bila kosong atau REJECTED). 
+
+• Verifikasi Teknis: Typecheck/lint passes. 
+
+### **US-006: Buat Laporan Catatan & Visit Out Selesai Kunjungan** 
+
+Tujuan User: Sebagai sales, saya ingin mengisi kategori aktivitas dan catatan laporan singkat saat selesai berkunjung (Visit Out) tanpa perlu ambil foto lagi. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Saat Visit Out (tanpa foto karena foto selfie sudah diambil saat Visit In), pilih kategori aktivitas, isi catatan kunjungan (plus alasan bila di luar radius), kirim token GPS (gps_session_token), dan sistem otomatis menandai kunjungan kilat < 3 menit kecuali kategori bertanda activity_categories.exempt_short_duration = true (contoh: 'Toko Tutup'). 
+
+• Form Laporan Visit Out: 
+
+Pilih Kategori Aktivitas: Diambil dari tabel activity_categories (contoh: Cek Stok, Order Barang, Pajang Produk, Toko Tutup). 
+
+Isi Catatan Kunjungan (visit_notes) & Validasi GPS (Tanpa Foto): Sales mengisi ringkasan hasil kunjungan pada visit_notes (ditambah alasan bila berada di luar radius toko atau akurasi GPS buruk) dan menyertakan gps_session_token aktif dari US-003 (tanpa pengambilan foto dan tanpa camera_token agar proses selesai kunjungan di lapangan cepat). 
+
+• Aturan Durasi (< 3 Menit) & Pengecualian exempt_short_duration: 
+
+Hitung Durasi: duration_minutes = visit_out_at - visit_in_at. 
+
+Kunjungan Terlalu Singkat: Jika durasi < 3 menit DAN activity_categories.exempt_short_duration = false (misal selain kategori 'Toko Tutup'), tandai PENDING_REVIEW (flag SHORT_DURATION). 
+
+Pengecualian Kategori (exempt_short_duration = true, misal 'Toko Tutup'): Durasi < 3 menit dianggap wajar dan tidak memicu 
+
+PENDING_REVIEW selama GPS memenuhi syarat radius. 
+
+• Radius saat Visit Out: Jika posisi/akurasi GPS saat Visit Out di luar ketentuan radius toko, tandai PENDING_REVIEW (OUT_OF_RADIUS_VISIT_OUT). 
+
+• Verifikasi Teknis: Typecheck/lint passes. 
+
+## **D. Alur HR Admin (HR_ADMIN)** 
+
+### **US-007: Kelola Data Master, Saldo Prorata & Reset Tahunan** 
+
+Tujuan User: Sebagai HR Admin, saya ingin mengelola karyawan (beserta tanggal masuk & saldo cuti), jadwal shift, kantor, toko, kategori sales, dan kalender libur/cuti bersama. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Pusat kendali data master HR: mulai dari onboarding karyawan baru + hitung prorata otomatis, kelola Cuti Bersama Idul Fitri, reset cuti tiap 1 Januari, sampai Soft Delete. 
+
+- Menu Data Karyawan: 
+
+Kelola Akun & Penugasan (Anti Self-Manipulation): Tambah/edit karyawan, atur role (HR_ADMIN boleh mengatur role EMPLOYEE_OFFICE, EMPLOYEE_SALES, maupun mengangkat HR_ADMIN baru lewat UI), office_location_id (wajib diisi untuk seluruh role termasuk EMPLOYEE_SALES sebagai cabang induk/ homebase filter rekap & zona waktu), default_shift_pattern_id (nullable untuk sales berjam fleksibel), upload foto referensi, Reset Password (otomatis menyetel must_change_password = true agar wajib diganti saat login pertama karyawan), serta Buka Kunci Akun / Unlock (menaikkan user_lock_version:{user_id} di Redis/Cache untuk menghapus blokir gagal login tanpa memerlukan alamat IP karyawan). Berlaku larangan anti self-manipulation (target_user_id ! 
+
+= actor_id): seorang HR_ADMIN dilarang mengubah role, join_date, status is_active, reference_photo_url, default_shift_pattern_id, office_location_id, Reset Password, maupun Unlock akunnya sendiri lewat panel admin (harus dilakukan oleh HR_ADMIN lain). Perubahan role karyawan ditolak server (HTTP 422) apabila karyawan tersebut masih memiliki kunjungan IN_PROGRESS pada sales_visits atau baris attendance_logs aktif hari berjalan yang belum Clock-Out agar sesi hari berjalan tidak terputus. Perubahan role menjadi EMPLOYEE_SALES juga ditolak server (HTTP 422) apabila karyawan masih memiliki pengajuan DINAS_LUAR berstatus PENDING atau APPROVED untuk tanggal ≥ hari_ini hingga dibatalkan lebih dulu. Apabila lolos, sistem otomatis mengosongkan default_shift_pattern_id = NULL dan menghapus baris jadwal user_shift_schedules berstatus source = PATTERN untuk tanggal ≥ hari_ini; sebaliknya apabila diubah menjadi EMPLOYEE_OFFICE atau HR_ADMIN, HR wajib memilih default_shift_pattern_id dan sistem langsung men-generate jadwal 90 hari ke depan. Ketika akun dinonaktifkan (is_active = false), server wajib langsung mencabut seluruh sesi login aktif akun tersebut dan middleware autentikasi wajib memeriksa is_active = true di setiap request (otomatis logout bila nonaktif). Setiap koreksi join_date otomatis menghitung ulang kelayakan kuota, prorata, dan Cuti Bersama pada leave_balances tahun berjalan tanpa menimpa used_days/pending_days. Seluruh perubahan akun/role, Reset Password, dan Unlock tercatat ke audit_logs. Saat karyawan baru didaftarkan atau pola default-nya diubah, sistem otomatis men-generate baris user_shift_schedules (source = PATTERN) hingga 3 bulan (90 hari) ke depan tanpa pernah menimpa baris yang sudah berstatus MANUAL_OVERRIDE (dilengkapi scheduler bulanan otomatis untuk memperpanjang horizon 3 bulan). 
+
+Aturan Keamanan Minimal 2 HR_ADMIN Aktif (Dukungan Peer Review): Karena HR_ADMIN dilarang menyetujui absensi maupun cutinya sendiri (no self-approval), sistem mewajibkan minimal terdapat 2 akun HR_ADMIN aktif (role = 'HR_ADMIN' AND is_active = true). Setiap kali ada aksi menonaktifkan akun (is_active = false) atau mengubah role seorang HR_ADMIN menjadi role lain, server menghitung sisa akun HR_ADMIN aktif; apabila sisa HR_ADMIN aktif akan menjadi kurang dari 2 orang (termasuk HR_ADMIN terakhir), server menolak aksi tersebut (HTTP 422) dengan pesan: 
+
+'Gagal mengubah status akun. Sistem mewajibkan minimal 2 HR Admin aktif agar proses saling verifikasi (peer review) tetap berjalan. Silakan tunjuk atau aktifkan HR Admin pengganti terlebih dahulu.' 
+
+Tanggal Masuk (join_date), Prorata 1 Tahun & Impor Saldo CSV: Saat HR mendaftarkan karyawan baru dan mengisi join_date, sistem langsung membuat baris leave_balances(user_id, tahun_berjalan): karyawan dengan masa kerja < 1 tahun (CURRENT_DATE < join_date + 1 year; khusus join_date 29 Februari jatuh pada 28 Februari di tahun non-kabisat) memiliki base_quota = 0, prorated_deduction = 0, dan tombol pengajuan CUTI terkunci hingga genap 1 tahun masa kerja (tidak dapat mengajukan cuti di muka sebelum tanggal genap 1 tahun tiba; SAKIT, IZIN, dan DINAS_LUAR tetap dapat diajukan), sedangkan bila saat onboarding atau koreksi join_date karyawan tercatat sudah ≥ 1 tahun, kuota tahun berjalan serta kelayakan Cuti Bersama langsung dihitung otomatis. Saat terjadi Cuti Bersama Idul Fitri dalam masa kerja < 1 tahun, karyawan tetap diliburkan dengan potongan saldo 0 hari (collective_leave_deduction = 0, tidak menjadi saldo minus). Tepat pada tanggal genap 1 tahun (join_date + 1 year), scheduler harian otomatis mengisi base_quota = 12 dan prorated_deduction sesuai rumus cut-off tanggal masuk: jika tanggal masuk ≤ 15 maka bulan ulang tahun kerja ikut dihitung (prorated_deduction = jumlah bulan sebelumnya, misal genap 10 Juli memberi 12 - 6 = 6 hari untuk Juli–Desember), sedangkan jika > 15 maka dihitung mulai bulan berikutnya (misal 20 Juli memberi 12 - 7 = 5 hari untuk Agustus–Desember), dan baru pada 1 Januari tahun berikutnya mendapat jatah 12 hari penuh (prorated_deduction = 0). Melengkapi pula fitur penyesuaian saldo cuti manual HR (wajib target_user_id != actor_id, tercatat ke audit_logs) serta Bulk Import CSV Saldo Awal Cuti dari Talenta yang wajib melewati tahap Preview validasi, diproses dalam transaksi atomik (all-or-nothing), menolak/melewati pembaruan untuk akun pengimpor sendiri (target_user_id != actor_id), menyaring formula CSV berbahaya (=, +, -, @), dan hanya memperbarui adjustment_days atau base_quota/prorated_deduction tanpa menimpa used_days dan pending_days yang sudah berjalan. 
+
+• Menu Master Shift (shifts): HR_ADMIN bebas Tambah, Edit 
+
+(mengubah code, name, start_time, end_time, grace_period_minutes default 10 menit, dan auto_close_hours default 5 jam untuk batas tutup lupa Clock-Out), maupun Nonaktifkan (is_active = false / soft delete, tercatat ke audit_logs) data shift sesuai kebutuhan cabang atau penyesuaian kode ekspor Talenta. Demi integritas jadwal, server menolak menonaktifkan shift yang masih dipakai oleh shift_patterns aktif maupun user_shift_schedules tanggal ≥ hari_ini hingga dialihkan lebih dulu. Setiap pengubahan jam start_time, end_time, grace_period_minutes, atau auto_close_hours berlaku untuk sesi Clock-In baru berikutnya (termasuk percobaan ulang attempt_no + 1 maupun input MANUAL_HR saat dibuat), karena setiap baris attendance_logs menyimpan salinan snapshot saat Clock-In (schedule_start_time, schedule_end_time, grace_period_minutes, auto_close_hours) sehingga baris absensi yang sudah Clock-In sebelumnya, riwayat tanggal lalu, perhitungan EARLY_LEAVE, default jam pulang MISSED_CLOCK_OUT, serta ekspor File 1 untuk hari yang memiliki attendance_logs tetap utuh (catatan batasan: hari tanpa attendance_logs seperti Alpa/Cuti/ Dayoff tetap membaca jadwal master terkini). 
+
+• Menu Pola Jadwal Kerja Mingguan & Kalender Shift (shift_patterns & user_shift_schedules): HR dapat menyusun template pola jadwal Senin–Minggu tetap per minggu (misal 'Office Jakarta' Senin–Jumat 08:00–16:00 & Sabtu–Minggu libur, atau 'Office Cabang 6 Hari' Surabaya/Bali/Pasuruan Senin–Jumat 08:00–16:00 & Sabtu 08:00– 13:00 bukan EARLY_LEAVE). Scheduler bulanan maupun penyimpanan pola shift otomatis men-generate jadwal harian ke user_shift_schedules (source = PATTERN) hingga 3 bulan (90 hari) ke depan tanpa pernah menimpa baris berstatus MANUAL_OVERRIDE. HR juga dapat melakukan Override Jadwal Harian per karyawan khusus untuk tanggal ≥ hari_ini dengan larangan mengubah jadwal dirinya sendiri (target_user_id != actor_id; koreksi masa lalu melalui US-008) serta penolakan otomatis apabila pada hari_ini karyawan sudah memiliki baris attendance_logs aktif pada tanggal tersebut. Setiap override jadwal otomatis memanggil recalculateLeaveRequestDays() untuk menghitung ulang total_days pengajuan PENDING/APPROVED serta menyesuaikan pending_days atau used_days pada leave_balances (bila total_days turun menjadi 0.0 karena seluruh tanggalnya menjadi is_day_off = true, header leave_requests otomatis berubah 
+
+menjadi CANCELLED; bila kenaikan total_days membuat available_balance menjadi negatif, muncul peringatan konfirmasi dan tercatat di audit_logs). 
+
+• Menu Lokasi Kantor: Atur 5 kantor cabang (Jakarta, Surabaya SIER, Surabaya Ketintang, Pasuruan, Bali), koordinat GPS, radius (meter), dan timezone (WIB / WITA). Setiap perubahan koordinat GPS maupun radius_m kantor berlaku untuk sesi Clock-In baru berikutnya (termasuk attempt_no + 1), karena setiap baris attendance_logs menyimpan salinan snapshot titik dan radius kantor saat Clock-In (office_lat, office_lng, office_radius_m) sehingga validasi jarak Clock-Out bagi karyawan yang sudah Clock-In sebelumnya tetap konsisten terhadap titik saat Clock-In (catatan batasan: timezone cabang tidak di-snapshot karena bersifat tetap per kantor cabang). 
+
+• Menu Toko (Outlet) & Kategori Aktivitas: Tambah/edit/impor daftar toko (impor CSV toko wajib memakai preview validasi, transaksi atomik all-or-nothing, dan sanitasi karakter pemicu Formula Injection =, +, -, @), verifikasi pengajuan toko baru (NOO) berstatus PENDING_VERIFICATION dari sales di US-005 menjadi ACTIVE (HR dapat melengkapi kode toko serta menyesuaikan radius/zona waktu bila perlu) atau INACTIVE jika ditolak (wajib mengisi locations.reject_reason, tampil ke sales pengaju dan tercatat di audit_logs; kunjungan yang sudah terlanjur tercatat pada toko NOO yang ditolak tetap masuk/bertahan di antrean PENDING_REVIEW dengan flag UNVERIFIED_OUTLET agar ditinjau satu per satu oleh HR berdasarkan bukti foto/GPS lapangan), dan kelola kategori aktivitas sales. 
+
+• Menu Pengaturan Mapping Kode Talenta (/admin/talentamapping): Menyediakan halaman konfigurasi bagi HR_ADMIN untuk mengatur pemetaan kode ekspor ke template Mekari Talenta pada tabel talenta_mappings (Attendance Code untuk Hadir attendance_present default 'H' dan Alpa attendance_absent default 'A', serta Time Off Code untuk Cuti Tahunan timeoff_annual, Cuti Bersama timeoff_collective, Cuti Bersama Unpaid karyawan < 1 tahun timeoff_collective_unpaid, Izin timeoff_izin, dan Sakit timeoff_sakit), profil tambahan karyawan pada tabel users (organization, job_position, job_level, employment_status), serta 2 
+
+key parameter opsi ekspor di talenta_mappings bernilai 'true'/'false': (1) use_offsite_schedule_for_talenta (default 'true': mengisi Schedule In dan Schedule Out pada File 1 memakai scheduled_start_time dan effective_end_time saat DINAS_LUAR agar hitungan telat Talenta selaras dengan aplikasi); dan (2) export_offday_overtime_to_talenta (default 'false': mengontrol apakah lembur hari OFF/libur yang disetujui HR ikut mengisi kolom Overtime Check In/Out pada File 1 atau tetap diekspor sebagai 'dayoff' kosong). Setiap perubahan konfigurasi mapping otomatis tercatat ke audit_logs (entity = 'talenta_mappings'). 
+
+• Menu Hari Libur, Cuti Bersama (holidays) & Reset Tahunan Otomatis: 
+
+Tipe Libur, Rekalkulasi Pengajuan & Cuti Bersama Idul Fitri: Kelola tanggal bertipe NATIONAL (location_id = NULL), LOCAL (wajib memilih location_id cabang khusus seperti libur lokal Bali), dan COLLECTIVE_LEAVE (location_id = NULL, khusus Cuti Bersama Idul Fitri yang jumlah harinya dinamis). Setiap kali hari bertipe NATIONAL, LOCAL, maupun COLLECTIVE_LEAVE ditambahkan, diubah tanggalnya, atau dihapus oleh HR, sistem otomatis memanggil recalculateLeaveRequestDays() untuk seluruh pengajuan cuti/izin PENDING dan APPROVED yang menabrak tanggal (≥ hari_ini) pada cabang terkait agar kuota cuti tidak terpotong di hari libur. Khusus mutasi COLLECTIVE_LEAVE, sistem juga otomatis menghitung ulang collective_leave_deduction pada leave_balances tahun berjalan khusus karyawan aktif yang telah genap masa kerja ≥ 1 tahun pada tanggal Cuti Bersama tersebut (karyawan < 1 tahun tetap diliburkan dengan potongan saldo 0 hari; tercatat ke audit_logs), tanpa mengurangi jatah 2 hari/bulan pribadi. 
+
+Reset 1 Januari (Tahun Kalender): Hak cuti mengikuti tahun kalender (1 Jan – 31 Des), bukan anniversary (kecuali alokasi perdana genap 1 tahun). Tiap 1 Januari, baris leave_balances tahun lalu (Y-1) dibiarkan sebagai arsip historis (sisa available_balance tahun lalu otomatis hangus / no carry-over). Untuk tahun baru (Y), scheduler membuat baris leave_balances(user_id, Y) bagi karyawan aktif dengan ketentuan: bila masa kerja pada 1 Jan masih < 1 tahun (CURRENT_DATE < join_date + 1 year) ditetapkan base_quota = 0, prorated_deduction = 0, dan 
+
+collective_leave_deduction = 0; bila sudah ≥ 1 tahun ditetapkan base_quota = 12, prorated_deduction = 0, dan menyinkronkan collective_leave_deduction tahun baru jika jadwal Idul Fitri sudah diinput. Apabila baris leave_balances(user_id, Y) sudah terbentuk lebih awal akibat pengajuan cuti lintas tahun di akhir tahun sebelumnya (US-009), scheduler wajib mempertahankan pending_days dan used_days yang sudah tercatat tanpa me-reset ke 0. 
+
+• Aturan Soft Delete: Data master yang sudah memiliki riwayat transaksi wajib dinonaktifkan (bukan hapus permanen) agar laporan historis tetap utuh: tabel users, shifts, shift_patterns, dan activity_categories memakai is_active = false, sedangkan tabel locations (kantor dan toko) memakai status = INACTIVE. Penonaktifan lokasi OFFICE ditolak server apabila masih terdapat karyawan aktif (is_active = true) yang menggunakan cabang tersebut pada users.office_location_id hingga seluruhnya dipindahkan lebih dulu; sedangkan untuk OUTLET yang dinonaktifkan saat sales masih memiliki kunjungan IN_PROGRESS, kunjungan berjalan tersebut tetap dapat diselesaikan menjadi PENDING_REVIEW. 
+
+- Jejak Audit Data Master (audit_logs): Seluruh aksi tambah, ubah, soft delete, maupun Reset Password di US-007 (termasuk perubahan radius/koordinat kantor, master shift, pola/jadwal shift, hari libur, mapping kode Talenta, dan data/role akun karyawan) wajib mencatat old_values, new_values, dan actor_id ke tabel audit_logs secara otomatis. 
+
+• Verifikasi Teknis: Typecheck/lint passes. 
+
+### **US-008: Pantau Kehadiran, Hierarki Approval & Ekspor Excel/CSV** 
+
+Tujuan User: Sebagai HR Admin, saya ingin memantau kehadiran harian semua tim, meninjau absen PENDING_REVIEW sesuai wewenang, dan mengunduh laporan. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Dashboard HR berisi rekap harian (kantor & sales), layar tinjau bukti foto + peta interaktif, aturan anti-self-approve berjenjang, serta ekspor Excel/CSV 1 baris per karyawan/hari. 
+
+• Banner Peringatan Setup Awal (Initial Setup): Apabila saat sistem baru pertama kali dipasang jumlah akun aktif dengan role = 'HR_ADMIN' baru terdaftar 1 orang, bagian atas Dashboard HR menampilkan banner peringatan permanen: 'Perhatian: Baru terdapat 1 HR Admin aktif. Segera tambahkan minimal 1 HR Admin kedua agar pengajuan cuti dan absensi HR dapat saling diverifikasi.' Banner otomatis hilang begitu akun HR_ADMIN kedua diaktifkan. 
+
+• Tabel Rekap Kehadiran Harian: 
+
+Cakupan: Menampilkan seluruh karyawan aktif pada tanggal terpilih. 
+
+Staf Kantor & HR: Menampilkan Shift, Jam Masuk, Jam Pulang, Menit Terlambat, Status Kehadiran (Hadir, Terlambat, Dinas Luar, Belum Absen / Alpa, Libur, Cuti, Izin, Sakit), Sumber Data (APP / MANUAL_HR), dan Status Verifikasi. Apabila fase masuk (clock_in_status) sah (AUTO_APPROVED atau APPROVED) sedangkan fase pulang (clock_out_status) berstatus REJECTED (clock_out_at = NULL), status kehadiran tetap terhitung 'Hadir'/'Terlambat' (dengan Jam Pulang kosong dan penanda catatan ditolak pada fase pulang). Aturan Transisi Status 'Belum Absen' menjadi 'Alpa': Selama jendela absen masuk masih terbuka (waktu_sekarang sebelum effective_end_time jadwal atau agenda DINAS_LUAR bila ada, dan belum ada absensi aktif maupun pengajuan CUTI/IZIN/SAKIT APPROVED), karyawan ditampilkan sebagai 'Belum Absen'; tepat saat batas penutupan jendela masuk berakhir dan karyawan tetap tidak melakukan Clock-In, status pada dashboard maupun rekap otomatis berubah menjadi 'Alpa'. 
+
+Tim Sales: Jam Mulai Kerja diambil dari Visit In toko pertama, Jam Selesai Kerja dari Visit Out toko terakhir, Total Toko Dikunjungi, serta Status Kehadiran (Hadir, Belum Absen / Alpa, Libur, Cuti, Izin, Sakit — tanpa Terlambat karena jam kerja fleksibel). Definisi Alpa tim sales pada hari kerja aktif (bukan Libur/Cuti/Izin/Sakit disetujui): selama hari berjalan dengan 0 kunjungan sah tampil 'Belum Absen'; jika lewat hari (H+1 dst) dengan 0 kunjungan atau 
+
+seluruh kunjungan CANCELLED jatuh menjadi 'Alpa', sedangkan bila seluruh kunjungan berstatus REJECTED ditampilkan dengan penanda 'Alpa (Ditolak HR)' agar berbeda dari mangkir tanpa jejak. Selama minimal ada 1 kunjungan aktif (AUTO_APPROVED, APPROVED, atau IN_PROGRESS/COMPLETED) tercatat 'Hadir', dan status 'Alpa (Ditolak HR)' otomatis kembali ke 'Hadir' jika HR_ADMIN mengoreksi status menjadi APPROVED. 
+
+Aturan Pengajuan PENDING pada Hari-H: Jika pada tanggal terpilih karyawan belum Clock-In/Visit In namun memiliki pengajuan cuti/ izin/sakit berstatus PENDING: (1) Selama hari-H masih berjalan, tabel rekap menampilkan Status Kehadiran 'Belum Absen' disertai penanda '(Pending Cuti)' / '(Pending Izin)' / '(Pending Sakit)' dengan tautan cepat ke antrean approval HR, dan tombol Clock-In/ Visit In tetap terbuka. (2) Jika hari-H sudah terlewati (H+1 dst) dan belum diputuskan HR, status kehadiran jatuh menjadi 'Alpa' dengan penanda 'Ada Pengajuan Pending'. 
+
+- Tabel Rincian Kunjungan Toko Sales: Menampilkan urutan rute per sales beserta durasi tiap toko, kategori aktivitas, catatan, foto bukti, dan flag anomali. 
+
+• Alur Verifikasi, Hierarki Approval & Jejak Audit: 
+
+Filter, Prioritas Hari Berjalan & Bukti Visual: Antrean PENDING_REVIEW otomatis mengurutkan item pada tanggal hari berjalan ('Perlu Review Hari Ini') di bagian paling atas lengkap dengan penanda sisa waktu absen ulang karyawan agar HR dapat memverifikasi sebelum sesi hari itu ditutup. Dilengkapi filter penyebab (OUT_OF_RADIUS, UNCERTAIN_ACCURACY, LOW_ACCURACY, SHARED_DEVICE, IMPOSSIBLE_TRAVEL, SHORT_DURATION, OFFSITE_DUTY, OFF_DAY_ATTENDANCE, dll.), perbandingan foto profil vs foto absen berdampingan (khusus flag SHARED_DEVICE menampilkan keterangan pasangan akun pengguna perangkat yang sama beserta jam absennya; khusus flag OFFSITE_DUTY menampilkan destination_location, scheduled_start_time, dan status pengajuan DINAS_LUAR), serta peta interaktif (titik lokasi + lingkaran radius R + titik user + lingkaran akurasi a). 
+
+Hierarki Anti Self-Approve: (1) Dilarang Approve/Reject absen 
+
+milik sendiri (reviewed_by != user_id). (2) HR_ADMIN memverifikasi absensi PENDING_REVIEW milik EMPLOYEE_OFFICE, EMPLOYEE_SALES, serta akun HR_ADMIN lainnya (peer review sesama HR_ADMIN dengan dukungan aturan minimal 2 HR_ADMIN aktif pada US-007). 
+
+Keputusan Approve / Reject: HR Admin meninjau fase yang berstatus PENDING_REVIEW (pada attendance_logs dipisah antara fase masuk clock_in_reviewed_* dan fase pulang clock_out_reviewed_* agar approval pagi tetap utuh walau sore muncul EARLY_LEAVE/OUT_OF_RADIUS; pada sales_visits memperbarui verification_status beserta reviewed_by dan reviewed_at). Approve → APPROVED (khusus flag MISSED_CLOCK_OUT absen kantor, form approval menetapkan Jam Pulang dengan default otomatis effective_end_time sesuai zona waktu kantor yang dapat diedit HR sebelum disimpan ke clock_out_at; khusus flag MISSED_VISIT_OUT kunjungan sales, HR dapat mengisi visit_out_at sesuai laporan sales untuk menghitung duration_minutes). Reject → wajib isi reject_reason, status fase terkait menjadi REJECTED (clock_out_at / visit_out_at tetap NULL jika berasal dari sesi yang ditutup otomatis scheduler). 
+
+Koreksi REJECTED ke APPROVED & Penguncian Percobaan Lama: HR_ADMIN (non-self, reviewed_by != user_id) berhak mengubah status REJECTED kembali menjadi APPROVED dengan mengisi alasan koreksi dan tercatat ke audit_logs (action = CORRECT_STATUS). Khusus pada attendance_logs, koreksi ditolak server (HTTP 409 Conflict) apabila pada (user_id, work_date) tersebut sudah terdapat percobaan absen lebih baru (attempt_no > target.attempt_no), sudah ada baris aktif lain (is_active_attempt = 1, termasuk input MANUAL_HR), ATAU sudah terdapat CUTI/IZIN/ SAKIT berstatus APPROVED di leave_request_days — sehingga Attempt 1 yang REJECTED terkunci permanen sebagai arsip untuk menjaga integritas UNIQUE(user_id, work_date, is_active_attempt) serta mencegah bentrok status hadir dan cuti. Apabila jam masuk/ pulang pada baris percobaan aktif perlu disesuaikan oleh HR_ADMIN lain (wajib user_id != actor_id dan mengisi alasan), validasi mewajibkan clock_out_at > clock_in_at, otomatis menghitung ulang late_minutes dan early_leave_minutes, serta mencatatnya ke audit_logs. Sedangkan pada sales_visits (yang 
+
+mengizinkan banyak kunjungan toko dalam satu hari), koreksi status kunjungan dari REJECTED menjadi APPROVED diizinkan langsung tanpa batasan attempt_no selama tidak bentrok dengan CUTI/IZIN/SAKIT APPROVED pada tanggal tersebut. Bulk Approve (Approve Massal): HR_ADMIN dapat mencentang banyak item PENDING_REVIEW sekaligus (dengan dialog konfirmasi) khusus untuk item non-self-approve (reviewed_by != user_id) yang tidak memerlukan pengisian jam pulang manual maupun verifikasi indikasi kecurangan — sehingga item dengan flag MISSED_CLOCK_OUT, MISSED_VISIT_OUT, SHARED_DEVICE, IMPOSSIBLE_TRAVEL, REPEATED_COORDS, CONSTANT_ACCURACY, STALE_TIMESTAMP, UNVERIFIED_OUTLET, OFFSITE_DUTY, maupun OFF_DAY_ATTENDANCE dikecualikan dari Bulk Approve dan wajib ditinjau satu per satu. 
+
+Efek Status REJECTED: Jika clock_in_status pada attendance_logs ditolak (REJECTED), penanda aktif dilepas (is_active_attempt = NULL), tombol Clock-Out disembunyikan serta ditolak server (HTTP 422), dan baris lama disimpan sebagai audit trail (foto, koordinat, dan clock_in_reject_reason tidak ditimpa); selama waktu sekarang masih sebelum effective_end_time (atau sebelum pukul 23:59 jika is_day_off = true / hari libur dengan shift_id kosong dan tanpa DINAS_LUAR), karyawan dapat absen ulang sebagai attempt_no + 1 dengan late_minutes dihitung dari jam absen ulang tersebut, sedangkan bila penolakan terjadi setelah batas waktu tersebut dihitung 'Alpa (Ditolak HR)' dan hanya dapat diubah melalui Koreksi Status HR (REJECTED → APPROVED). 
+
+Input Absen / Kunjungan Manual Darurat HR (source = MANUAL_HR): Tersedia tombol 'Input Absen Manual' bagi HR_ADMIN dalam kondisi darurat (misal HP karyawan rusak berat/ hilang atau tugas luar mendadak ekstrem tanpa sempat ke kantor): HR memilih karyawan, tanggal, shift, dan jam masuk/pulang (atau kunjungan toko), serta wajib mengisi alasan dispensasi (minimal 10 karakter). Untuk attendance_logs, server menolak dengan pesan validasi apabila pada (user_id, work_date) tersebut sudah terdapat baris absensi aktif (is_active_attempt = 1) maupun pengajuan CUTI/IZIN/SAKIT berstatus APPROVED pada leave_request_days (harus dibatalkan lebih dulu di US-009 jika ingin diinput manual); 
+
+apabila terdapat pengajuan leave_request_days berstatus PENDING pada tanggal tersebut, sistem otomatis membatalkan baris PENDING tanggal itu dan melepaskan pending_days (sama seperti absen hadir biasa). Baris tersimpan dengan source = 'MANUAL_HR' dan status langsung APPROVED, sementara seluruh kolom bukti teknis lapangan (foto selfie, koordinat GPS, akurasi, jarak, device_id) dibiarkan NULL di database. Berlaku aturan anti selfinput (HR_ADMIN dilarang menginput absen/kunjungan manual untuk akun dirinya sendiri: user_id != actor_id), setiap baris source = 'MANUAL_HR' menampilkan badge khusus 'Input Manual HR' beserta nama penginput dan alasannya di dashboard, serta seluruh aksi tercatat permanen di tabel audit_logs (action = MANUAL_ATTENDANCE). 
+
+• Spesifikasi Ekspor Excel (.xlsx) & CSV Resmi PT. LSI (3 Format: 2 Resmi Talenta + 1 Audit Internal): Seluruh endpoint ekspor (File 1, File 2, dan File 3) hanya dapat diakses oleh HR_ADMIN, dibatasi maksimal rentang 93 hari (3 bulan) per kali ekspor untuk menjaga performa server, disanitasi terhadap CSV/Formula Injection (awalan =, +, -, @), dan setiap unduhan wajib dicatat ke audit_logs (action = EXPORT_ATTENDANCE, mencatat periode dan jenis file). 
+
+File 1 - Ekspor Absensi Office (Format Template Resmi Mekari Talenta — 26 Kolom, Sheet 'Sheet1'): Diperuntukkan bagi staf kantor (EMPLOYEE_OFFICE dan HR_ADMIN) dengan urutan dan nama header persis sesuai template resmi PT. LSI: Employee ID*, Full Name, Date*, Shift, Schedule In, Schedule Out, Attendance Code, Check In, Check Out, Overtime Check In, Overtime Check Out, Overtime Before, Overtime After, Overtime Break Before, Overtime Break After, Time Off Code, Time Off Halfday, Time Off Schedule In, Time Off Schedule Out, Branch, Organization, Job Position, Job Level, Employment Status, Join Date, Lock Status. Aturan pengisian baris: (a) Filter Anti Double-Row: tepat 1 baris per (user_id, work_date) dari percobaan aktif (is_active_attempt = 1) atau percobaan terakhir bila seluruhnya REJECTED; (b) Format Tanggal & Jam: Date* dan Join Date berformat YYYY-MM-DD, sedangkan Schedule In/Out dan Check In/Out berformat HH:mm; (c) Hari Kerja Hadir & Dinas Luar: Shift diisi kode shift aktif (misal JWD Jakarta, SWD/SWE Surabaya, BWD/BWE Bali, PWD/PWE 
+
+Pasuruan — Jakarta Sabtu terhitung dayoff), Schedule In dan Schedule Out mengambil snapshot attendance_logs (schedule_start_time dan schedule_end_time), atau memakai scheduled_start_time dan effective_end_time saat DINAS_LUAR apabila opsi use_offsite_schedule_for_talenta = 'true', Attendance Code diisi kode mapping Hadir (default 'H', termasuk bila hadir di bawah DINAS_LUAR yang disetujui maupun apabila fase masuk sah tetapi clock_out_status = REJECTED dengan Check Out dikosongkan); seluruh kolom Overtime* dikosongkan dan Lock Status diisi '0'; (d) Hari Kerja Alpa vs Belum Absen Hari Berjalan: jika pada hari kerja aktif yang jendelanya sudah tutup tidak ada absensi sah (atau seluruh percobaan REJECTED tanpa koreksi), Attendance Code diisi kode mapping Alpa (default 'A') dengan Schedule In/Out dari jadwal terkini dan Check In/Out dikosongkan — sedangkan khusus tanggal hari_ini yang jendela absennya masih terbuka ('Belum Absen'), Attendance Code dikosongkan sementara (tidak dicap 'A') dan dialog peringatan tampil bila rentang ekspor menyertakan hari berjalan; (e) Hari Libur Mingguan / OFF: apabila tanpa absensi lembur (termasuk pengajuan DINAS_LUAR akhir pekan yang tidak memiliki Clock-In), baris dibuat dengan Shift = 'dayoff', Schedule In = '00:00', Schedule Out = '00:00', serta Attendance Code, Check In, dan Check Out dikosongkan; apabila terdapat lembur hari OFF yang disetujui HR dan opsi export_offday_overtime_to_talenta = 'true', kolom Overtime Check In dan Overtime Check Out diisi jam masuk/pulang lembur tersebut; (f) Cuti / Izin / Sakit Disetujui & Cuti Bersama (< 1 Tahun): mengisi Time Off Code sesuai mapping HR (termasuk timeoff_collective_unpaid untuk karyawan < 1 tahun yang ikut diliburkan tanpa potongan saldo) serta mengosongkan Attendance Code, Time Off Halfday, Time Off Schedule In, dan Time Off Schedule Out (karena ESS hanya mendukung pengajuan harian penuh); dan (g) sebelum unduhan dimulai, jika pada periode ekspor masih ada pengajuan leave_requests berstatus PENDING maupun absensi kantor berstatus PENDING_REVIEW, tampilkan warning modal konfirmasi ('Masih ada [N] pengajuan Cuti/Izin/Sakit PENDING dan [M] absensi kantor PENDING_REVIEW pada periode ini. Data tersebut berpotensi berubah jika belum diputuskan HR. Tetap export?'). 
+
+File 2 - Ekspor Kunjungan Sales (Format Laporan Live Attendance 
+
+— 18 Kolom, Sheet 'Worksheet'): Diperuntukkan bagi tim sales (EMPLOYEE_SALES) dengan urutan dan nama header persis sesuai laporan resmi PT. LSI: Date, Check Time, Type, Employee ID, Full Name, Job Position, Face recognition, Liveness validation, Shift Name, Shift Code, Shift Label, Location Setting Name, Location GPS Name, Location Address, Location Coordinate, Description, Mobile Flag, Status. Aturan pengisian baris: (a) Kunjungan dengan visit_status = CANCELLED dikecualikan dari laporan; setiap kunjungan sah/pending/ditolak diekspor dalam format 1 baris per kejadian: Visit In menjadi Type = 'Clock In' (Description = Nama Toko), sedangkan baris Visit Out menjadi Type = 'Clock Out' (Description = Nama Toko + ' - ' + Catatan Laporan Kunjungan) HANYA dibuat apabila visit_out_at IS NOT NULL (kunjungan IN_PROGRESS atau AUTO_CLOSED yang jam pulangnya masih NULL hanya mengekspor baris 'Clock In'); (b) Format Tanggal & Jam: Date berformat YYYY-MM-DD dan Check Time berformat HH:mm:ss; (c) Kolom Face recognition & Liveness validation dikosongkan (atau '-') mengikuti template karena sistem tidak memakai AI wajah; Shift Name, Shift Code, dan Shift Label diisi 'MKT'; Location Setting Name, Location GPS Name, dan Location Address mengikuti data outlet terkait; Location Coordinate berformat 'latitude,longitude' tanpa spasi (atau dikosongkan bila source = MANUAL_HR karena tanpa koordinat GPS perangkat); Mobile Flag diisi 'Mobile App' (atau 'Manual HR' bila source = MANUAL_HR); Status secara default hanya mengekspor kunjungan yang sudah sah (AUTO_APPROVED dan APPROVED sebagai 'Approved') agar baris yang belum diverifikasi atau ditolak tidak ikut terimpor ke payroll Talenta, dilengkapi checkbox opsional pada modal ekspor ("Sertakan kunjungan berstatus Pending dan Rejected", default tidak dicentang). Catatan batasan format: File 2 hanya mengekspor kejadian Visit In (Clock In) dan Visit Out (Clock Out) kunjungan toko sesuai format Live Attendance 18 kolom, sehingga data Cuti, Izin, Sakit, dan Alpa tim sales tidak diekspor lewat File 2 melainkan dipantau lewat rekap Dashboard HR serta File 3 untuk input manual HR di Talenta. 
+
+File 3 - Ekspor Rekap Audit & Anomali Internal HR (.xlsx / .csv — Opsional Audit HR): Menyediakan file ekspor pelengkap khusus kebutuhan audit internal HR di luar template Talenta, memuat: Tanggal, NIK, Nama, Role, Cabang, Zona Waktu, Shift/Toko, 
+
+Sumber Data (APP / MANUAL_HR), Jam Masuk/Visit In, Jam Pulang/Visit Out, Total Durasi Kerja, Status Kehadiran (termasuk penanda 'Alpa (Ditolak HR)' dan baris CANCELLED untuk audit pembatalan sales), Status Verifikasi per Fase, Flag Anomali (OUT_OF_RADIUS, SHARED_DEVICE, EARLY_LEAVE, SHORT_DURATION, UNVERIFIED_OUTLET, dll.), Alasan Karyawan/ Visit In/Batal, Diverifikasi Oleh, Waktu Verifikasi, dan Alasan Reject. 
+
+• Pengujian: Typecheck/lint passes. 
+
+## **E. Pengajuan Cuti, Izin, Sakit & Dinas Luar — ESS (Untuk Semua Karyawan)** 
+
+**US-009: Pengajuan Cuti, Izin, Sakit & Dinas Luar Terjadwal (Employee Self-Service / ESS)** 
+
+Tujuan User: Sebagai karyawan (kantor maupun sales), saya ingin mengajukan Cuti Tahunan, Izin, Sakit, maupun Dinas Luar Terjadwal secara mandiri lewat web lengkap dengan lampiran agar tidak ditandai alpa dan dapat absen di lokasi dinas. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Form ESS khusus harian penuh mendukung 4 jenis (CUTI, IZIN, SAKIT, dan DINAS_LUAR khusus staf kantor/HR): hak cuti tahunan terkunci 0 hari untuk karyawan dengan masa kerja < 1 tahun (tanpa pengajuan di muka) dan wajib diajukan minimal H-3 hari kerja efektif sebelum tanggal cuti, IZIN dibatasi maksimal 2 hari dan diperbolehkan diajukan mundur (backdate) maksimal H-2 hari kerja (disamakan dengan SAKIT), hitung hari kerja otomatis hanya pada rentang jadwal 3 bulan yang sudah terbit (tanpa fallback tebakan) serta hitung ulang otomatis jika jadwal dioverride HR, saldo cuti terpisah dari izin/sakit/dinas luar, batas normal cuti 2 hari/bulan bisa di-override HR dengan 'Lanjutkan/ Batal', peringatan bentrok cuti antar-HR, serta dukung Sakit & Izin 
+
+#### Susulan H-2. 
+
+• Menu, Rute & Halaman ESS Karyawan (/leave): Dapat diakses oleh EMPLOYEE_OFFICE, EMPLOYEE_SALES, serta staf HR yang ikut absen melalui menu navigasi '/leave' (bottom bar pada tampilan mobile karyawan berlabel 'Cuti & Izin' untuk sales atau 'Cuti, Izin & Dinas' untuk kantor/HR, serta sidebar di panel HR). Halaman / leave menampilkan: (a) ringkasan saldo cuti tahunan (jatah 12 hari bagi masa kerja ≥ 1 tahun atau 0 hari bila < 1 tahun, terpakai, pending_days, dan sisa tersedia), (b) tombol 'Ajukan Cuti / Izin / Sakit / Dinas Luar' untuk membuka form pengajuan (opsi jenis pengajuan DINAS_LUAR disembunyikan pada tampilan form milik EMPLOYEE_SALES dan ditolak server dengan HTTP 403 Forbidden apabila dikirim oleh EMPLOYEE_SALES), dan (c) daftar riwayat pengajuan pribadi beserta statusnya (PENDING, APPROVED, REJECTED lengkap dengan reject_reason, PARTIALLY_CANCELLED, CANCELLED), dilengkapi tombol 'Batalkan Pengajuan' mandiri khusus selama pengajuan masih berstatus PENDING (otomatis mengubah status ke CANCELLED dan langsung melepaskan pending_days). Antrean persetujuan dan pembatalan di sisi HR diakses melalui menu 'Persetujuan Cuti/Izin' (/admin/leaves). 
+
+- Batasan Durasi Harian Penuh: Hanya untuk permohonan minimal 1 hari kerja penuh (izin setengah hari/jam ditangani lewat presensi di US-004). Server menolak pengajuan non-dinas luar (CUTI, IZIN, SAKIT) dengan HTTP 422 apabila rentang tanggal yang dipilih seluruhnya jatuh pada hari libur atau is_day_off = true sehingga total_days bernilai 0; khusus jenis DINAS_LUAR dikecualikan dari syarat total_days > 0 agar karyawan tetap dapat mengajukan dinas akhir pekan atau hari libur (total_days = 0.0 tanpa memotong kuota cuti). 
+
+- Form Pengajuan & 4 Jenis Pengajuan: Pilih jenis: (1) CUTI = Cuti Tahunan (khusus karyawan yang telah genap masa kerja ≥ 1 tahun pada tanggal pengajuan / CURRENT_DATE ≥ join_date + 1 year tanpa pengajuan di muka, tidak dapat backdate, dan wajib diajukan paling lambat H-3 hari kerja efektif sebelum start_date di luar hari libur dan is_day_off = true; ditolak server dengan HTTP 422 apabila diajukan kurang dari 3 hari kerja efektif), (2) IZIN = Izin Keperluan Pribadi seharian (maksimal total_days ≤ 2 hari kerja 
+
+efektif, dapat diajukan mundur/backdate maksimal H-2 hari kerja efektif dengan menghitung mundur 2 hari kerja aktif karyawan di luar hari libur dan is_day_off = true), (3) SAKIT = Sakit (dapat diajukan mundur/backdate maksimal H-2 hari kerja efektif dengan aturan hitung mundur yang sama), atau (4) DINAS_LUAR = Dinas Luar Terjadwal (khusus role EMPLOYEE_OFFICE dan HR_ADMIN, wajib diajukan paling lambat H-1 sebelum hari dinas (start_date > hari_ini waktu kantor) dengan melengkapi destination_location kota/tempat tujuan dan scheduled_start_time jam mulai agenda dinas sebagai acuan keterlambatan; saat APPROVED membuka blokir jarak kantor di US-004 tanpa mengunci tombol absen). HR Admin wajib memproses DINAS_LUAR sebelum jam kerja hari-H; apabila hingga hari-H pengajuan DINAS_LUAR masih berstatus PENDING, tombol Clock-In dan Clock-Out di lokasi dinas tetap dibuka tanpa blokir jarak kantor > 200m dengan status otomatis PENDING_REVIEW (flag OFFSITE_DUTY disertai penanda 'Dinas Luar Belum Di-Approve'), dan apabila pengajuan dinas tersebut kemudian ditolak HR (REJECTED) maka baris attendance_logs yang tertaut langsung diubah pada fase yang tersedia (clock_in_status serta clock_out_status bila sudah Clock-Out menjadi REJECTED, is_active_attempt = NULL, clock_in_reviewed_by / clock_out_reviewed_by = actor_id HR penolak, dan clock_in_reject_reason diisi alasan penolakan dinas); karyawan tetap dapat melakukan absen ulang di kantor apabila waktu server masih sebelum schedule_end_time normalnya (atau lewat Koreksi Status HR di US-008 jika jendela sudah tutup). Tentukan rentang tanggal mulai–selesai dan tulis alasan. 
+
+• Batas Horizon Jadwal 3 Bulan & Hitung Hari Kerja Efektif Otomatis (total_days): Bagi karyawan yang memiliki pola jadwal kerja (users.default_shift_pattern_id != NULL), pengajuan hanya dapat dilakukan pada rentang tanggal yang baris jadwalnya di user_shift_schedules sudah diterbitkan (hingga 3 bulan / 90 hari ke depan sesuai US-007); jika memilih tanggal di luar jadwal yang sudah terbit, sistem menolak dengan pesan: 'Jadwal kerja untuk tanggal tersebut belum diterbitkan. Pengajuan hanya dapat dilakukan untuk tanggal yang jadwalnya sudah tersedia (maksimal 3 bulan ke depan).' Khusus karyawan berjam fleksibel tanpa pola jadwal (EMPLOYEE_SALES dengan default_shift_pattern_id = NULL yang tidak memiliki baris di user_shift_schedules), batas pengajuan 
+
+ke depan langsung dibatasi ≤ hari_ini + 90 hari berbasis hari kerja cabang induknya (locations.work_days) sehingga tetap tidak pernah ada tebakan jadwal. Perhitungan total_days memakai 2 filter: (a) Filter Hari Kerja Karyawan: menghitung tanggal pada user_shift_schedules dengan is_day_off = false bagi karyawan berpola, atau hari kerja cabang locations.work_days bagi karyawan fleksibel tanpa pola; (b) Filter Hari Libur: seluruh tanggal di tabel holidays (nasional, lokal cabang seperti Bali, maupun Cuti Bersama) otomatis dilewati (0 hari). Apabila HR kemudian melakukan override jadwal harian di US-007, total_days pengajuan PENDING maupun APPROVED otomatis dihitung ulang. 
+
+• Peringatan Jadwal Cuti Bentrok Antar-HR_ADMIN: Apabila pemohon memiliki role = 'HR_ADMIN' dan mengajukan CUTI, IZIN, atau DINAS_LUAR, sistem memeriksa jumlah akun HR_ADMIN aktif yang tetap bertugas pada rentang tanggal tersebut; jika jumlah HR_ADMIN yang masuk kerja menjadi kurang dari 2 orang, sistem menampilkan banner peringatan bagi pemohon maupun HR pemeriksa: 'Catatan: Pada tanggal tersebut, jumlah HR Admin yang masuk kerja tersisa kurang dari 2 orang sehingga saling verifikasi antar-HR berpotensi tertunda.' 
+
+• Lampiran Bukti Medis (Khusus SAKIT): Wajib upload foto/file Surat Keterangan Dokter (SKD) resmi format JPG/PNG/PDF maksimal 2 MB; server memvalidasi MIME type / magic-bytes isi berkas asli (bukan sekadar ekstensi nama file) dan menyimpannya di direktori privat terproteksi dengan akses via Signed URL sesuai FR-6. 
+
+- Kebijakan Saldo & Pemisahan Jenis: 
+
+Pemotong Saldo: Jatah tahunan = 12 hari per tahun kalender bagi karyawan dengan masa kerja ≥ 1 tahun (bernilai 0 hari jika < 1 tahun). Hanya CUTI pribadi dan COLLECTIVE_LEAVE (Cuti Bersama Idul Fitri) yang memotong leave_balances. 
+
+Bukan Pemotong Saldo: SAKIT (dengan SKD), IZIN, dan Hari Libur NATIONAL/LOCAL TIDAK memotong saldo cuti tahunan dan TIDAK terkena batas bulanan. 
+
+- Validasi Saldo, Kunci Kuota & Cuti Lintas Tahun (Anti Double- 
+
+Submit): Server memastikan total_days > 0 (HTTP 422 bila seluruh tanggal rentang jatuh pada hari libur/OFF). Saat pengajuan disubmit, sistem menyimpan 1 baris header di leave_requests sekaligus memecah seluruh rentang start_date..end_date ke tabel leave_request_days per tanggal beserta nilai day_value (1.0 atau 0.0) dan status awal PENDING; saat HR menekan Approve/Reject pada pengajuan (maupun saat karyawan membatalkan pengajuan yang masih PENDING), status seluruh baris leave_request_days yang berstatus PENDING ikut diperbarui menjadi APPROVED/ REJECTED/CANCELLED. Khusus jenis CUTI (termasuk pengajuan lintas tahun kalender seperti 30 Desember – 2 Januari), validasi saldo, penguncian pending_days, pemotongan used_days, maupun pengembalian kuota saat REJECTED/CANCELLED/pembatalan parsial dipecah per tahun kalender berdasarkan YEAR(leave_date) pada masing-masing baris leave_request_days: (a) hari kerja di tahun berjalan Y divalidasi dan dikunci/dipotong pada leave_balances(user_id, Y), sedangkan hari kerja di tahun berikutnya Y+1 divalidasi dan dikunci/dipotong pada leave_balances(user_id, Y+1); (b) apabila karyawan mengajukan cuti lintas tahun pada bulan Nov/Des dan baris leave_balances(user_id, Y+1) belum tersedia, sistem otomatis membuatkannya terlebih dahulu (lazy initialization: base_quota = 12, prorated_deduction = 0, used_days = 0, pending_days = 0, serta menghitung collective_leave_deduction tahun Y+1 jika jadwal Cuti Bersama sudah ada); dan (c) selama status PENDING, kuota masing-masing tahun langsung dikunci di pending_days agar tidak bisa dipakai mengajukan dobel (dan tetap terlindungi saat scheduler Reset 1 Januari berjalan di US-007). 
+
+- Batas Normal 2 Hari/Bulan (Soft Warning): Pengambilan CUTI pribadi dibatasi normal maks 2 hari kerja efektif per bulan kalender (dihitung per bulan jika lintas akhir bulan, serta mengecualikan Cuti Bersama). Jika lewat 2 hari, form tidak memblokir melainkan memunculkan peringatan kuning (soft warning untuk kondisi mendesak) dan memberi label khusus di Dashboard HR. 
+
+- Persetujuan HR & Dialog Override ('Lanjutkan / Batal'): Pengajuan berstatus PENDING hingga HR Admin lain klik Approve/Reject (dilarang approve pengajuan milik sendiri: reviewed_by != user_id; pengajuan milik seorang HR_ADMIN diverifikasi oleh HR_ADMIN 
+
+lainnya). Khusus CUTI yang ditandai melebihi batas 2 hari/bulan, klik Approve akan memunculkan dialog: 'Cuti 2 hari/bulan sudah terpakai. Tetap setujui pengajuan ini?' dengan tombol 'Lanjutkan' dan 'Batal'. 
+
+• Cegah Bentrok Jadwal Hadir & Pengajuan Tumpang Tindih: (1) Anti Tumpang Tindih Pengajuan: Jika rentang tanggal pengajuan baru beririsan dengan tanggal pada leave_request_days lain milik karyawan yang masih berstatus PENDING atau APPROVED, server menolak dengan HTTP 422 ('Pengajuan gagal: Tanggal [tanggal] sudah memiliki pengajuan Cuti/Izin/Sakit/Dinas Luar lain yang sedang diproses atau disetujui'). (2) Anti Bentrok Kehadiran: Jika rentang tanggal sudah ada catatan Clock-In aktif di attendance_logs maupun Visit In aktif (bukan CANCELLED) di sales_visits, form menolak dengan pesan: 'Pengajuan gagal: Tanggal [tanggal] sudah memiliki riwayat kehadiran/kunjungan aktif'. Khusus apabila pada tanggal tersebut sudah ada baris attendance_logs dengan clock_in_status = 'REJECTED' ataupun kunjungan sales_visits berstatus verification_status = 'REJECTED' (termasuk status 'Alpa (Ditolak HR)'), pengajuan IZIN backdate ditolak (harus diselesaikan melalui Koreksi Status REJECTED → APPROVED di US-008), sedangkan pengajuan SAKIT susulan wajib SKD tetap diizinkan dengan menampilkan badge peringatan keras di antrean HR ('Ada absen/kunjungan REJECTED pada tanggal ini') agar pemeriksa meninjau konteksnya. Sebaliknya, apabila karyawan memiliki pengajuan non-dinas luar (type != 'DINAS_LUAR', yakni CUTI, IZIN, atau SAKIT) yang masih berstatus PENDING (memeriksa leave_request_days dengan status = 'PENDING' saja — tidak pernah menyentuh status APPROVED maupun jenis DINAS_LUAR) dan karyawan tetap melakukan Clock-In atau Visit In pada salah satu tanggal (leave_date), sistem menjalankan transaksi atomik saat Clock-In/Visit In untuk mengubah baris leave_request_days pada tanggal tersebut menjadi CANCELLED (cancelled_by = user_id, cancelled_at = now(), cancel_reason = 'Batal otomatis karena karyawan hadir'), mengurangi leave_requests.total_days sebesar day_value tanggal tersebut, serta mengurangi 
+
+leave_balances.pending_days sebesar day_value khusus apabila type = 'CUTI' (melepaskan kuota ke available_balance), sementara tanggal-tanggal lain dalam pengajuan multi-hari tetap berstatus PENDING (header leave_requests.status tetap PENDING selama 
+
+masih ada tanggal yang belum diputus HR, dan berubah menjadi CANCELLED apabila seluruh tanggal batal). 
+
+• Sakit & Izin Susulan (Backdate H-2) & Rekonsiliasi ALPA → SAKIT/IZIN: Khusus SAKIT (wajib lampirkan SKD) dan IZIN (maksimal 2 hari) boleh diajukan mundur maksimal 2 hari kerja efektif (H-2 hari kerja aktif; lewat batas H-2 ditolak otomatis). Di antrean HR, pengajuan ini berlabel 'Sakit (Susulan)' atau 'Izin (Susulan)' beserta status hari itu (ALPA). Jika HR APPROVE, status kehadiran otomatis berubah ALPA → SAKIT atau ALPA → IZIN; jika REJECT, wajib isi alasan dan status tetap ALPA. 
+
+• Pembatalan Cuti/Izin/Dinas Luar Disetujui (Oleh HR): Pengajuan APPROVED (CUTI, IZIN, SAKIT, maupun DINAS_LUAR) tidak bisa dibatalkan sepihak oleh karyawan; hanya HR Admin (non-self: actor_id != user_id) yang dapat melakukan pembatalan penuh maupun pembatalan parsial per tanggal. HR Admin memilih satu atau beberapa tanggal sisa pada leave_request_days dengan syarat wajib leave_date ≥ hari_ini (tanggal yang sudah lewat < hari_ini dikunci tetap APPROVED agar rekap absensi & payroll yang sudah berjalan tetap sah) serta wajib mengisi cancel_reason. Sistem menjalankan transaksi atomik untuk mengubah status baris leave_request_days terpilih menjadi CANCELLED, menghitung jumlah day_value tanggal yang dibatalkan, mengurangi leave_requests.total_days dan mengembalikan leave_balances.used_days secara parsial sebesar nilai tersebut (khusus jenis CUTI; untuk DINAS_LUAR tidak mengubah kuota cuti melainkan mengembalikan validasi radius kantor normal saat Clock-In/Out), memperbarui header leave_requests.status menjadi PARTIALLY_CANCELLED (bila masih ada tanggal berstatus APPROVED) atau CANCELLED (bila seluruh tanggal dibatalkan), mencatat aksi ke audit_logs, dan langsung membuka kembali kunci tombol Clock-In/Visit In pada tanggal yang dibatalkan. 
+
+- Rekonsiliasi Rekap & Ekspor CSV Talenta: Hari kerja yang disetujui pada leave_request_days (APPROVED) otomatis tampil berstatus 'Cuti', 'Izin', atau 'Sakit' di rekap harian HR (bukan Alpa), dan bagi staf kantor/HR mengisi kolom Time Off Code pada File 1 Talenta (sedangkan untuk tim sales tetap diproses melalui modul ESS /leave serta tampil pada rekap Dashboard HR dan File 3 audit 
+
+internal sebagai acuan input HR di Talenta, karena File 1 khusus staf kantor/HR dan File 2 Live Attendance hanya memuat kejadian Visit In/Out). Khusus DINAS_LUAR APPROVED tidak mengisi Time Off Code melainkan tampil sebagai 'Dinas Luar' / Hadir ('H' pada File 1) apabila karyawan melakukan Clock-In di lokasi dinas (atau tetap 'Alpa' / 'A' bila tidak melakukan Clock-In di hari kerja). Sebaliknya, pengajuan yang masih PENDING pada hari-H tampil sebagai 'Belum Absen (Pending [Jenis])' di UI HR dan jatuh menjadi 'Alpa' jika melewati hari-H maupun saat diekspor (disertai warning modal sebelum download bila masih ada pengajuan PENDING atau absensi PENDING_REVIEW di periode ekspor). 
+
+- Verifikasi Teknis: Typecheck/lint passes. 
+
+**US-010: Riwayat Absensi, Status Verifikasi & Notifikasi Reject** 
+
+Tujuan User: Sebagai karyawan kantor, tim sales, maupun staf HR yang ikut absen, saya ingin memantau riwayat absensi pribadi, status verifikasi HR, alasan penolakan (reject), serta status pengajuan cuti/izin agar tahu bila perlu absen ulang. 
+
+Kriteria Diterima (Acceptance Criteria): 
+
+Intinya: Halaman riwayat pribadi (/attendance/history) menampilkan log absen/kunjungan 30 hari atau per bulan beserta status verifikasi dan reject_reason, terakses dari menu pendukung aplikasi (seperti tombol hub 'Lainnya' berisi pintasan riwayat, cuti/ izin, dan profil), ditambah banner 'Absen Ulang' di beranda saat REJECTED. 
+
+- Akses & Cakupan Data (/attendance/history): Dapat diakses oleh EMPLOYEE_OFFICE, EMPLOYEE_SALES (misalnya melalui menu pendukung / tombol hub 'Lainnya' yang merangkum pintasan Riwayat Absensi, Cuti & Izin /leave, dan Profil), maupun HR_ADMIN lewat sidebar panel HR. Halaman ini hanya menampilkan riwayat milik pengguna yang login (user_id = auth.id). 
+
+• Riwayat Absensi Kantor & Kunjungan Sales (Filter Bulan / 30 Hari Terakhir): Untuk EMPLOYEE_OFFICE dan HR_ADMIN (attendance_logs): menampilkan tanggal shift (work_date), urutan percobaan (attempt_no), jam masuk/pulang, foto selfie pribadi via Signed URL terproteksi (hanya bila user_id = auth.id sesuai FR-6), status dan flag per fase (clock_in_status, clock_out_status, anomaly_flags), serta alasan reject (clock_in_reject_reason / clock_out_reject_reason). Untuk EMPLOYEE_SALES (sales_visits): menampilkan tanggal, nama toko, durasi kunjungan, catatan kunjungan (visit_notes), foto selfie pribadi via Signed URL terproteksi, visit_status, verification_status, flag anomali, dan reject_reason. 
+
+• Banner Status Hari Berjalan, Email Notifikasi & Pintasan Absen Ulang (REJECTED): Begitu HR Admin menolak absensi/kunjungan (REJECTED), sistem otomatis mengirimkan email notifikasi melalui SMTP Mailer / Queue Worker ke users.email karyawan (notifikasi email dibatasi khusus untuk penolakan absensi/kunjungan agar antrean email ringkas, sedangkan hasil pengajuan cuti/izin dipantau lewat /leave; apabila pengiriman email gagal atau email tidak aktif, banner peringatan langsung di beranda dan riwayat / attendance/history tetap menjadi notifikasi utama) berisi alasan penolakan (reject_reason) beserta batas waktu absen ulang jika berlaku. Pada halaman utama /attendance/office ditampilkan kartu status verifikasi hari berjalan: jika clock_in_status = REJECTED dan waktu server masih sebelum effective_end_time (atau sebelum 23:59 bila is_day_off = true / hari libur dengan shift_id kosong dan tanpa DINAS_LUAR), sistem menampilkan banner peringatan berisi clock_in_reject_reason dan tombol pintasan 'Absen Ulang Sekarang' (membuka percobaan attempt_no + 1 dengan late_minutes dihitung dari clock_in_at percobaan ulang tersebut). Apabila penolakan terjadi setelah melewati effective_end_time, tombol absen ulang tidak ditampilkan, status tercatat sebagai 'Alpa (Ditolak HR)', dan banner mengarahkan karyawan untuk menghubungi HR Admin dengan bukti pendukung guna diproses melalui Koreksi Status (REJECTED → APPROVED) di US-008. Khusus halaman utama tim sales (/attendance/sales), kartu status menampilkan kunjungan hari berjalan beserta peringatan bila ada kunjungan yang ditolak (verification_status = REJECTED) lengkap dengan nama toko dan reject_reason — mengarahkan sales melanjutkan kunjungan toko 
+
+lain bila masih hari berjalan atau menghubungi HR Admin untuk koreksi status bila seluruh kunjungan hari itu ditolak ('Alpa (Ditolak HR)'). 
+
+- Keterhubungan dengan Riwayat Cuti & Izin (/leave): Riwayat pengajuan Cuti, Izin, Sakit & Dinas Luar (PENDING, APPROVED, REJECTED beserta reject_reason, PARTIALLY_CANCELLED, dan CANCELLED) tetap merujuk ke /leave (US-009) dan dapat dijangkau melalui pintasan menu pendukung yang sama. 
+
+- Pengujian: Typecheck/lint passes & diuji pada skenario tampilkan reject_reason serta tombol Absen Ulang setelah clock_in_status ditolak HR. 
+
+# **4. Functional Requirements (Aturan Teknis Utama)** 
+
+FR-1 — Jam Server & Multi-Zona Waktu PT. LSI: Semua timestamp disimpan UTC dari jam server, lalu dikonversi ke timezone cabang masing-masing (WIB / Asia/Jakarta untuk Jakarta, Surabaya SIER, Surabaya Ketintang, Pasuruan; WITA / Asia/Makassar untuk Bali) saat tampil di UI, watermark, atau hitung telat. Khusus kunjungan sales (sales_visits), penentuan tanggal visit_date memakai timezone cabang induk sales (users.office_location_id), sedangkan tampilan jam kunjungan lokal dan watermark foto memakai timezone lokasi toko (outlet_location_id). 
+
+FR-2 — Rumus Jarak Haversine & Matriks Radius vs Akurasi: 
+
+1. AUTO_APPROVED: Jarak d ≤ R DAN akurasi GPS a ≤ R (serta a ≤ 100m), bebas dari kondisi/flag PENDING_REVIEW lain (bukan toko NOO, bukan DINAS_LUAR [OFFSITE_DUTY], bukan lembur hari libur / is_day_off [OFF_DAY_ATTENDANCE], bukan EARLY_LEAVE, bukan SHORT_DURATION < 3 menit, serta lolos pengecekan FR-3 dan FR-4). 
+
+2. PENDING_REVIEW (UNCERTAIN_ACCURACY): Jika d ≤ R tetapi 
+
+akurasi GPS a > R (contoh: jarak 40m, radius 50m, akurasi 80m; posisi asli bisa berada di luar radius). Wajib isi alasan. 
+
+3. PENDING_REVIEW (LOW_ACCURACY): Jika d ≤ R dan a ≤ R tetapi akurasi GPS a > 100m (contoh: cabang beradius besar R = 150m, jarak 30m, namun akurasi GPS 120m sehingga tetap gagal syarat a ≤ 100m AUTO_APPROVED). Wajib isi alasan. 
+
+4. PENDING_REVIEW (OUT_OF_RADIUS / OUT_OF_RADIUS_VISIT_OUT): Jika R < d ≤ max(200m, R) saat Clock-In kantor maupun Visit In toko sales, ATAU jika d > R pada saat Clock-Out / Visit Out (tanpa batas blokir 200m). Wajib isi alasan (dan pada Visit In tetap wajib selfie per US-005). 
+
+5. Ditolak / Diblokir Keras (d > max(200m, R)): Berlaku seragam khusus untuk Clock-In kantor maupun Visit In toko guna mencegah absen masuk dari luar area (kecuali untuk Clock-In kantor apabila karyawan memiliki pengajuan DINAS_LUAR berstatus APPROVED atau PENDING hari-H pada work_date tersebut per US-004 & US-009). Sebaliknya, Clock-Out kantor maupun Visit Out toko tidak pernah diblokir berdasarkan jarak jauh agar karyawan tidak terjebak gagal menutup sesi setelah bertugas di luar lokasi. 
+
+FR-3 — 4 Lapisan Anti-Fake GPS di Server (Otomatis PENDING_REVIEW bila terdeteksi; pada attendance_logs dicatat per fase ke clock_in_anomaly_flags atau clock_out_anomaly_flags): 
+
+1. IMPOSSIBLE_TRAVEL: Jarak perpindahan antar dua titik berurutan (lat/lng IS NOT NULL, mengabaikan baris MANUAL_HR) di hari kerja yang sama > 5 km DAN kecepatan rata-rata > 120 km/jam (memakai pembagi minimal 1 detik bila dua timestamp identik untuk mencegah pembagian nol, misal 20 km dalam 3 menit), sehingga loncatan sinyal GPS biasa di lokasi yang sama tidak salah tertangkap. Kunjungan sales berstatus visit_status = CANCELLED dikecualikan dari perhitungan agar batal salah pilih toko tidak memicu false positive. 
+
+2. REPEATED_COORDS: Koordinat hasil pembulatan 6 angka desimal (round(lat, 6), round(lng, 6)) identik persis muncul pada ≥ 5 sesi dalam rentang 7 hari terakhir (khusus sales: langsung memicu jika koordinat identik muncul pada ≥ 2 toko berbeda dalam 7 hari 
+
+#### terakhir). 
+
+3. CONSTANT_ACCURACY: Nilai accuracy_m sama persis muncul ≥ 5 sesi berturut-turut dalam rentang 7 hari terakhir; khusus absensi maupun kunjungan yang berada di dalam radius (d ≤ R), flag ini baru memicu PENDING_REVIEW apabila muncul bersamaan dengan REPEATED_COORDS agar koneksi Wi-Fi dalam gedung kantor atau area ritel/mal tidak memicu false positive. 
+
+4. STALE_TIMESTAMP: Browser wajib memanggil Geolocation API dengan maximumAge: 0 dan meminta token sesi GPS sekali pakai (gps_session_token, disimpan di Redis/Cache server dengan TTL 300 detik) pada seluruh transaksi absensi dan kunjungan — termasuk Visit Out tanpa foto — serta camera_token (TTL 300 detik) pada transaksi berfoto (Clock-In/Out kantor dan Visit In sales). Server memeriksa jeda waktu sejak gps_session_token diterbitkan hingga request diterima: jeda 120–300 detik memicu PENDING_REVIEW (STALE_TIMESTAMP), sedangkan lebih dari 300 detik, token milik user lain, atau token yang sudah dipakai ditolak server agar pengguna memuat ulang GPS (tidak membandingkan position.timestamp jam HP terhadap jam server agar HP dengan jam lokal tidak sinkron tidak terkena false positive). 
+
+FR-4 — Deteksi Titip Absen 1 HP (SHARED_DEVICE): Server menerbitkan dan memvalidasi UUID device_id melalui httpOnly, Secure, SameSite=Lax Cookie sebagai sumber utama di backend (sedangkan localStorage/user_agent hanya menjadi pelengkap bila cookie terhapus; pengecekan mengabaikan baris source = MANUAL_HR yang device_id-nya NULL). Pengecekan dilakukan secara gabungan lintas tabel attendance_logs dan sales_visits pada tanggal kerja lokal yang sama sehingga penggunaan 1 HP bersama antara staf kantor dan tim sales tetap terdeteksi. Jika 1 device_id dipakai ≥ 2 akun berbeda pada tanggal kerja lokal yang sama: (1) akun ke-2 dst. langsung diberi flag SHARED_DEVICE pada anomaly_flags fase terkait dan berstatus PENDING_REVIEW; (2) pada sesi akun ke-1 di hari yang sama, sistem ikut menambahkan flag SHARED_DEVICE ke anomaly_flags fase yang memakai device_id tersebut secara retroaktif — jika status fase terkait masih AUTO_APPROVED otomatis diubah menjadi PENDING_REVIEW (pada attendance_logs mengubah clock_in_status dan/atau 
+
+clock_out_status sesuai fase kejadiannya) agar kedua pihak ditinjau HR, sedangkan jika sudah diputuskan HR (APPROVED/REJECTED) status tidak ditimpa dan flag hanya tercatat sebagai jejak audit. Catatan: bersifat indikator dini bagi HR (bukan jaminan mutlak jika user hapus data browser / pakai Incognito). 
+
+FR-5 — Anti Klik Ganda & Idempotency Server: Tombol submit didisable saat loading; setiap request dari aplikasi (source = APP) wajib mengirim idempotency_key (UUID, HTTP 422 jika kosong) yang disimpan pada kolom ber-constraint UNIQUE di database (clock_in_idempotency_key, clock_out_idempotency_key, visit_in_idempotency_key, visit_out_idempotency_key — masingmasing nullable agar baris source = MANUAL_HR dapat bernilai NULL berulang). Urutan eksekusi server wajib memeriksa idempotency_key yang sudah tercatat milik user_id yang sama LEBIH DULU sebelum memvalidasi atau mengkonsumsi token sekali pakai (gps_session_token dan camera_token) agar retry jaringan tidak ditolak gara-gara token percobaan pertama sudah terpakai; jika ditemukan, server mengembalikan respons sukses (HTTP 200 OK) berisi data tersimpan sebelumnya (dan HTTP 409 Conflict jika key dikirim oleh user_id berbeda, serta menangkap race-condition duplikat antar-request milidetik berdekatan secara aman tanpa melempar HTTP 500). 
+
+FR-6 — Perlindungan Data Pribadi & Retensi (UU PDP): Foto absensi, lampiran data kesehatan/SKD (leave_requests.attachment_path), dan koordinat GPS disimpan di penyimpanan privat terproteksi. Berkas foto maupun SKD hanya dapat dibuka oleh HR_ADMIN berwenang atau oleh pemilik data sendiri (user_id = auth.id, untuk melihat SKD maupun foto absen pribadinya di US-010) melalui endpoint terproteksi / Signed URL berumur pendek (TTL 5–15 menit, bukan link publik tebakan). Retensi 12 bulan (dapat dikonfigurasi HR/legal perusahaan) berlaku untuk berkas foto absen/kunjungan, lampiran SKD, koordinat GPS mentah, DAN alamat IP mentah (*_ip), yang otomatis dihapus/di-NULL oleh scheduler setelah melewati 12 bulan (serta pembersihan foto profil referensi pasca masa retensi akun nonaktif; UI riwayat menampilkan penanda 'Berkas melewati retensi 12 bulan' bila bernilai NULL), sementara ringkasan teks kehadiran dan status cuti/sakit harian tetap disimpan untuk audit 
+
+serta rekap payroll mengacu pada status per tanggal di leave_request_days (sehingga riwayat hari cuti yang telah dijalani tetap tercatat APPROVED meskipun sisa tanggal berikutnya dibatalkan secara parsial). Khusus tabel audit_logs dikecualikan dari pembersihan otomatis retensi 12 bulan agar integritas rantai jejak audit tetap terjaga. 
+
+# **5. Non-Goals (Batasan yang Tidak Dibuat)** 
+
+1. Tanpa Hitung Gaji & Payroll: Tidak menghitung gaji pokok, denda keterlambatan, uang makan, maupun komisi sales (tetap di sistem payroll internal / Talenta). 
+
+2. Tanpa Jadwal Rute Terkunci (Fixed Call Plan): Sales bebas memilih atau mencari toko dari daftar master outlet maupun mengajukan toko baru (NOO) dengan kunci GPS. 
+
+3. Tanpa Mode Offline: Karyawan & sales wajib terhubung internet saat Clock-In/Out atau Visit In/Out. 
+
+4. Tanpa Modul Transaksi Penjualan / POS: Tidak menangani nota penjualan, faktur, atau pembayaran kasir di luar pencatatan kunjungan & kehadiran. 
+
+5. Tanpa Integrasi Fingerprint Divisi Produksi: Karyawan divisi produksi yang memakai mesin fingerprint terpisah tidak dimasukkan ke aplikasi web absensi ini maupun ke sistem Mekari Talenta (termasuk tidak menyediakan fitur rotasi regu multiminggu atau shift malam lintas tengah malam). 
+
+**6. Design Considerations (Tampilan UI/UX)** 
+
+Mobile-First (Karyawan & Sales): Layout vertikal 1 kolom untuk layar HP, tombol aksi utama tinggi minimal 48px agar nyaman dipakai satu tangan di lapangan. 
+
+Desktop Dashboard (HR Admin): Tabel lebar dengan filter cepat antrean PENDING_REVIEW, modal perbandingan foto profil vs foto absen berdampingan (side-by-side), dan peta interaktif (lingkaran radius + lingkaran akurasi GPS). 
+
+# **7. Technical Considerations, Tech Stack & Database Architecture (ERD)** 
+
+**A. Tech Stack & Infrastruktur (Standar PT. LSI)** 
+
+Backend: PHP 8.x + Laravel (Eloquent ORM, Laravel Scheduler/ Cron untuk penutupan lupa Clock-Out kantor, penutupan kunjungan sales menggantung MISSED_VISIT_OUT, & reset cuti tahunan, Rate Limiter bawaan). 
+
+Frontend: Svelte via Inertia.js (monolith Laravel + Inertia.js + Svelte memakai session/CSRF bawaan Laravel, mendukung sveltecheck & ESLint). 
+
+Database: MySQL (Production/Staging; constraint absensi pakai is_active_attempt) dan SQLite (Local/Testing); atau ekuivalen Partial Unique Index bila suatu saat memakai PostgreSQL. 
+
+Containerization, Redis, Scheduler/Queue & Penyimpanan Foto: Docker (Dockerfile & docker-compose.yml untuk PHP-FPM, Nginx, MySQL, Redis, serta container khusus Laravel Scheduler/Cron dan Queue Worker). Seluruh tugas terjadwal (penutupan lupa Clock- 
+
+Out, AUTO_CLOSED kunjungan 23:59, generate jadwal shift 3 bulan ke depan, reset cuti 1 Januari, dan pembersihan retensi 12 bulan) dirancang idempoten dengan mekanisme kejar ketertinggalan (catch-up) otomatis saat container menyala kembali apabila server sempat mengalami downtime pada jam eksekusi terjadwal. Penyimpanan foto lokal memakai Docker volume persisten terpisah dengan alokasi minimum 100 GB untuk retensi 12 bulan (estimasi maksimal ~65 GB untuk ~600 foto/hari berukuran kurang dari 300 KB selama 365 hari kalender plus buffer; bahkan lebih hemat apabila hanya mencakup operasional kantor/sales), dilengkapi backup harian otomatis ke storage/NAS cadangan PT. LSI dan pembersihan otomatis berkas lebih dari 12 bulan. Pengiriman email notifikasi membutuhkan konfigurasi SMTP Mailer pada .env yang diproses asinkron melalui Queue Worker. 
+
+Peta & Pengolahan Gambar: Leaflet.js + OpenStreetMap (gratis, mendukung pin & lingkaran radius); PHP GD/Imagick (intervention/image) untuk watermark di server. 
+
+Ekspor & Keamanan Klien: maatwebsite/excel atau streamed CSV; wajib HTTPS (izin kamera WebRTC & Geolocation Chrome/Safari); kompresi foto client-side < 300 KB di Svelte sebelum upload. 
+
+## **B. Entity Relationship Diagram (ERD)** 
+
+Ringkasan relasi antar tabel dan kolom kunci untuk mendukung jadwal kerja cabang, multi-zona waktu (WIB/WITA), pemisahan masuk/pulang, saldo cuti, pemetaan kode Talenta, serta jejak audit HR. 
+
+1. Tabel Relasi Antar Entitas (Foreign Keys) 
+
+Tabel Induk (1) 
+
+Tabel Anak (N) 
+
+Kolom Foreign Key 
+
+Penjelasan Relasi 
+
+#### locations 
+
+users 
+
+office_location_id 
+
+1 Lokasi Kantor ditempati banyak Karyawan/HR. 
+
+shift_patterns 
+
+users 
+
+default_shift_pattern_id 
+
+1 Pola Jadwal Mingguan dipakai banyak Karyawan sebagai jadwal default (nullable bagi Sales). 
+
+shifts 
+
+shift_patterns 
+
+mon_shift_id .. sun_shift_id 
+
+1 Master Shift dapat dipetakan ke hari Senin–Minggu pada banyak pola jadwal kerja. 
+
+users 
+
+user_shift_schedules 
+
+user_id 
+
+1 Karyawan memiliki banyak jadwal harian per tanggal (UNIQUE user_id, work_date). 
+
+shifts 
+
+user_shift_schedules 
+
+shift_id 
+
+1 Master Shift dipakai pada banyak jadwal harian tanggal tertentu. 
+
+#### users 
+
+user_shift_schedules 
+
+created_by 
+
+1 HR Admin menetapkan atau meng-override jadwal harian. 
+
+users 
+
+attendance_logs 
+
+user_id 
+
+1 Karyawan/HR memiliki banyak riwayat absensi harian (termasuk attempt_no). 
+
+users 
+
+attendance_logs 
+
+clock_in_reviewed_by, clock_out_reviewed_by 
+
+1 HR Admin memverifikasi fase masuk dan fase pulang pada banyak riwayat absensi secara terpisah. 
+
+locations 
+
+attendance_logs 
+
+location_id 
+
+1 Lokasi Kantor tercatat pada banyak riwayat absensi. 
+
+shifts 
+
+attendance_logs 
+
+shift_id 
+
+1 Jadwal Shift tersimpan sebagai snapshot pada banyak riwayat absensi. 
+
+users sales_visits user_id 1 Sales memiliki banyak riwayat kunjungan toko. users sales_visits reviewed_by 1 HR Admin memverifikasi banyak kunjungan sales. locations sales_visits outlet_location_id 1 Toko (Outlet) dikunjungi berkali-kali oleh Sales. activity_categories sales_visits activity_category_id 1 Kategori Aktivitas dipakai pada banyak laporan kunjungan. users leave_requests user_id 1 Karyawan memiliki banyak riwayat pengajuan cuti/izin/sakit. users leave_requests 
+
+reviewed_by 
+
+1 HR Admin memverifikasi pengajuan cuti/izin/sakit. 
+
+users 
+
+leave_balances 
+
+user_id 
+
+1 Karyawan memiliki 1 baris kuota saldo cuti per tahun kalender (UNIQUE user_id, year). 
+
+locations 
+
+holidays 
+
+#### location_id 
+
+1 Lokasi Kantor dapat memiliki hari libur lokal khusus cabang (e.g. Bali). 
+
+users 
+
+audit_logs 
+
+actor_id 
+
+1 HR Admin tercatat sebagai pelaku pada setiap log audit perubahan data master & reset password. 
+
+users 
+
+leave_request_days 
+
+user_id 
+
+1 Karyawan memiliki banyak rincian tanggal pengajuan cuti/izin/ sakit/dinas luar. 
+
+leave_requests 
+
+leave_request_days 
+
+#### leave_request_id 
+
+1 Header Pengajuan dipecah ke banyak baris per tanggal (UNIQUE leave_request_id, leave_date). 
+
+leave_requests 
+
+attendance_logs 
+
+leave_request_id 
+
+1 Pengajuan DINAS_LUAR APPROVED dapat menautkan banyak log absensi di lokasi dinas. 
+
+users 
+
+locations 
+
+created_by 
+
+1 HR Admin atau Sales membuat titik kantor/NOO baru (nullable, ON DELETE SET NULL agar seeding aman dari circular FK). 
+
+users 
+
+leave_request_days 
+
+cancelled_by 
+
+1 Karyawan atau HR Admin membatalkan baris tanggal pengajuan cuti/izin tertentu (nullable). 
+
+users 
+
+talenta_mappings 
+
+updated_by 
+
+1 HR Admin memperbarui konfigurasi mapping kode ekspor Mekari Talenta (nullable). 
+
+Aturan Foreign Key & Integritas Historis: Seluruh relasi pada tabel transaksi dan log (attendance_logs, sales_visits, leave_requests, 
+
+leave_balances, audit_logs) menerapkan ON DELETE RESTRICT untuk menjaga keutuhan arsip (penghapusan memakai Soft Delete), kecuali leave_request_days.leave_request_id yang memakai ON DELETE CASCADE saat header dibersihkan, serta locations.created_by (nullable, ON DELETE SET NULL) guna menghindari circular foreign key dengan users.office_location_id saat seeding awal. 
+
+2. Ringkasan Struktur Tabel Database (14 Tabel) 
+
+Nama Tabel 
+
+PK 
+
+Foreign Keys 
+
+Kolom Utama & Fungsi 
+
+locations 
+
+id 
+
+created_by → users.id (nullable, ON DELETE SET NULL) 
+
+code (UK nullable sementara saat NOO), name, type (OFFICE/ OUTLET), address, latitude, longitude, radius_m, timezone (Asia/ Jakarta | Asia/Makassar), work_days (JSON [1..5]/[1..6]), status (ACTIVE/PENDING_VERIFICATION/INACTIVE), reject_reason (nullable) 
+
+shifts 
+
+id 
+
+code (UK), name, start_time, end_time, grace_period_minutes (INT DEFAULT 10), auto_close_hours (INT DEFAULT 5), is_active 
+
+shift_patterns 
+
+id 
+
+mon_shift_id .. sun_shift_id → shifts.id (nullable) 
+
+name, mon_shift_id .. sun_shift_id (nullable bila OFF), is_active 
+
+user_shift_schedules 
+
+id 
+
+user_id, created_by → users.id; shift_id → shifts.id (nullable) 
+
+work_date (DATE 3 bulan ke depan, UK dgn user_id), is_day_off (BOOLEAN default false), source (PATTERN | MANUAL_OVERRIDE), timestamps 
+
+#### users 
+
+id 
+
+office_location_id → locations.id; default_shift_pattern_id → shift_patterns.id (nullable) 
+
+nik (UK), email (UK), name, password_hash, must_change_password (BOOLEAN default false), role (EMPLOYEE_OFFICE | EMPLOYEE_SALES | HR_ADMIN), office_location_id, join_date, reference_photo_url, consent_accepted_at, organization/job_position/ job_level/employment_status (nullable), is_active (rate limit login di Redis/Cache) 
+
+attendance_logs 
+
+id 
+
+user_id, clock_in_reviewed_by, clock_out_reviewed_by → users.id; location_id → locations.id; shift_id → shifts.id (nullable); leave_request_id → leave_requests.id (nullable) 
+
+source (APP/MANUAL_HR), work_date, attempt_no, 
+
+is_active_attempt (UK per user_id+work_date+is_active_attempt), schedule_start_time, schedule_end_time, grace_period_minutes, auto_close_hours, office_lat, office_lng, office_radius_m (snapshot saat Clock-In), clock_in_* (idempotency_key UK nullable; bukti nullable saat MANUAL_HR), clock_out_* (idempotency_key UK 
+
+nullable), clock_in_status, clock_out_status, anomaly_flags per fase, reject_reason per fase, late_minutes, early_leave_minutes 
+
+sales_visits 
+
+id 
+
+user_id, reviewed_by → users.id; outlet_location_id → locations.id; activity_category_id → activity_categories.id (nullable) 
+
+source (APP/MANUAL_HR), visit_date, visit_in_* (foto selfie wajib pada APP; cancel_reason nullable; idempotency_key UK nullable; bukti nullable saat MANUAL_HR), visit_out_* (tanpa foto; lat/lng/ accuracy/distance/idempotency_key UK nullable), activity_category_id, duration_minutes, visit_notes, visit_status (IN_PROGRESS/COMPLETED/CANCELLED/AUTO_CLOSED), verification_status (AUTO_APPROVED/PENDING_REVIEW/ APPROVED/REJECTED), anomaly_flags (termasuk UNVERIFIED_OUTLET), reviewed_at, reject_reason 
+
+activity_categories 
+
+id 
+
+name (Cek Stok, Order Barang, Pajang Produk, Toko Tutup), exempt_short_duration (true untuk Toko Tutup), is_active 
+
+#### holidays 
+
+id 
+
+location_id → locations.id (nullable) 
+
+holiday_date, description, holiday_type (NATIONAL | LOCAL | COLLECTIVE_LEAVE), cegah duplikat libur nasional NULL via validasi unik server (kompatibel SQLite & MySQL) 
+
+leave_requests 
+
+id 
+
+user_id, reviewed_by → users.id 
+
+type (CUTI/SAKIT/IZIN/DINAS_LUAR), start_date, end_date, total_days, destination_location (nullable), scheduled_start_time (nullable), reason, attachment_path, status (PENDING/APPROVED/ REJECTED/PARTIALLY_CANCELLED/CANCELLED), reviewed_at, reject_reason, timestamps 
+
+leave_balances 
+
+id 
+
+user_id → users.id 
+
+year (UK dgn user_id), base_quota (12; 0 jika masa kerja < 1 tahun), prorated_deduction, collective_leave_deduction, used_days, pending_days, adjustment_days, timestamps 
+
+audit_logs 
+
+id 
+
+actor_id → users.id 
+
+entity (locations/shifts/shift_patterns/user_shift_schedules/holidays/ users/attendance_logs/sales_visits/leave_balances/leave_requests/ activity_categories/talenta_mappings), record_id, action (CREATE/ UPDATE/SOFT_DELETE/RESET_PASSWORD/UNLOCK_ACCOUNT/ CORRECT_STATUS/MANUAL_ATTENDANCE/BULK_IMPORT/ CANCEL_LEAVE/OVERRIDE_LIMIT/EXPORT_ATTENDANCE), old_values (JSON), new_values (JSON), reason, prev_hash, row_hash, created_at 
+
+leave_request_days 
+
+id 
+
+leave_request_id → leave_requests.id; user_id, cancelled_by → users.id (nullable) 
+
+leave_date (DATE, UK dgn leave_request_id), day_value (1.0/0.0), status (PENDING/APPROVED/REJECTED/CANCELLED), 
+
+cancelled_at, cancel_reason, timestamps 
+
+talenta_mappings 
+
+id 
+
+updated_by → users.id (nullable) 
+
+mapping_key (UK: kode attendance/timeoff + opsi ekspor use_offsite_schedule_for_talenta & export_offday_overtime_to_talenta), mapping_value, description (nullable), timestamps 
+
+3. Database Indexes Wajib (Performa Query Anomali, Rekap & Cuti): attendance_logs mengindeks (user_id, work_date), (clock_in_device_id, work_date), dan (clock_out_device_id, work_date); sales_visits mengindeks (user_id, visit_date), (visit_in_device_id, visit_date), dan (visit_out_device_id, visit_date) — mengandalkan DB::transaction plus lockForUpdate() di US-005 untuk menjaga tepat 1 kunjungan IN_PROGRESS tanpa menambah kolom lock terpisah; leave_request_days mengindeks (user_id, leave_date, status); serta audit_logs mengindeks (entity, record_id). 
+
+# **8. Testing Strategy & Success Metrics** 
+
+## **Strategi Pengujian (Testing)** 
+
+1. Backend Unit & Feature Test (PHPUnit / Pest di Laravel — SQLite & MySQL): Selain SQLite untuk umpan balik cepat lokal, seluruh test suite wajib dijalankan pada database MySQL (container Docker / CI) guna memverifikasi perilaku query JSON (anomaly_flags, work_days), konversi tanggal/timezone WIB–WITA, serta constraint UNIQUE(user_id, work_date, is_active_attempt): 
+
+Haversine & Radius vs Akurasi: Termasuk skenario d=40m, R=50m, a=80m → PENDING_REVIEW. 
+
+Shift, Zona Waktu, Dinas & Audit: Toleransi telat 10 menit, WIB vs WITA, jadwal Sabtu 13:00 (SWE/BWE/PWE), DINAS_LUAR (OFFSITE_DUTY selalu PENDING_REVIEW, pengecualian autocancel, serta penanganan saat dinas PENDING ditolak setelah ada absen), snapshot attendance_logs saat Clock-In, validasi batas H-3 cuti, saldo/prorata serta Cuti Bersama masa kerja < 1 tahun, cuti lintas tahun (30 Des – 2 Jan) + Reset 1 Januari, perubahan role antar-peran, serta integritas append-only & hash chain audit_logs. 
+
+Algoritma Anomali: IMPOSSIBLE_TRAVEL, REPEATED_COORDS, CONSTANT_ACCURACY, STALE_TIMESTAMP. 
+
+2. Typecheck, Lint & Simulasi Browser: Jalankan svelte-check, ESLint, PHPStan/Pint, serta mock geolocation & fake video stream untuk uji dalam radius, luar radius, dan akurasi > 100m. 
+
+3. Uji Perangkat Fisik (UAT Lapangan): Tes langsung di Android (Chrome) dan iOS (Safari) untuk memastikan izin kamera selfie (depan) & sensor GPS asli berjalan lancar. 
+
+## **Success Metrics (Metrik Keberhasilan Terukur)** 
+
+1. Kecepatan Proses Submit: Median waktu dari buka kamera hingga absen tersimpan di server < 10 detik di jaringan 4G normal. 
+
+2. Rasio Antrean Verifikasi: Persentase absen harian reguler masuk PENDING_REVIEW < 15% dari total absensi (di luar kasus yang oleh aturan sistem selalu memerlukan tinjauan seperti OFFSITE_DUTY dan OFF_DAY_ATTENDANCE). 
+
+3. Efisiensi Review HR: Median waktu HR Admin memverifikasi per item antrean PENDING_REVIEW ≤ 30 detik/item (ditunjang fitur Bulk Approve di US-008 untuk item non-self-approve tanpa input jam pulang manual). 
+
+4. Visibilitas Anti-Fraud: 100% kasus uji (test case) skenario SHARED_DEVICE dan IMPOSSIBLE_TRAVEL otomatis tertangkap oleh sistem dan terlabeli di dashboard HR (ketentuan lapangan mengikuti batasan teknis pada FR-4). 
+
+# **Lampiran: Catatan Tata Kelola Sistem** 
+
+1. Audit Trail (audit_logs): Seluruh log mutasi data master, koreksi status, input absen manual HR, pembatalan cuti, serta pengunduhan ekspor tersimpan permanen di tabel audit_logs dan dapat dilihat (read-only) melalui menu Riwayat Audit Sistem (/admin/auditlogs) oleh HR Admin (HR_ADMIN). Untuk mencegah manipulasi atau penghapusan log secara teknis, integritas append-only diterapkan berlapis: (1) pemisahan hak akses DB di mana akun aplikasi hanya memiliki privilese INSERT dan SELECT pada audit_logs (REVOKE UPDATE, DELETE; akun migrasi terpisah); (2) model Eloquent AuditLog memblokir aksi update/delete di level aplikasi (termasuk pada SQLite testing); (3) trigger MySQL BEFORE UPDATE/DELETE yang melempar error; (4) pengecualian audit_logs dari scheduler retensi 12 bulan (FR-6); (5) backup harian ke NAS yang tidak dapat ditimpa oleh server aplikasi; serta (6) rantai hash kriptografis (prev_hash dan row_hash SHA-256 per baris) guna mendeteksi jika terjadi pengubahan langsung di level database. 
+
+2. Ruang Lingkup Divisi Produksi: Karyawan divisi produksi menggunakan mesin fingerprint terpisah sehingga tidak dimasukkan ke aplikasi web Hybrid Live Attendance v5 ini maupun ke Mekari Talenta; oleh karena itu fitur rotasi regu multi-minggu dan shift malam lintas tengah malam dikeluarkan agar sistem ringkas dan fokus penuh pada EMPLOYEE_OFFICE, EMPLOYEE_SALES, dan HR_ADMIN. 
+

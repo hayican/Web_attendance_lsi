@@ -1,8 +1,11 @@
 <?php
 
 use App\Enums\UserRole;
+use App\Http\Controllers\Admin\ExportController;
+use App\Http\Controllers\Admin\HrDashboardController;
 use App\Http\Controllers\Admin\LeaveApprovalController;
 use App\Http\Controllers\Admin\MasterDataController;
+use App\Http\Controllers\Attendance\HistoryController;
 use App\Http\Controllers\Attendance\OfficeAttendanceController;
 use App\Http\Controllers\Attendance\SalesVisitController;
 use App\Http\Controllers\Auth\ConsentController;
@@ -48,12 +51,23 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
         Route::post('attendance/sales/{visit}/visit-out', [SalesVisitController::class, 'visitOut'])->name('attendance.sales.visit-out');
     });
 
+    Route::get('attendance/history', [HistoryController::class, 'index'])->name('attendance.history');
+
     Route::get('leave', [LeaveController::class, 'index'])->name('leave.index');
     Route::post('leave', [LeaveController::class, 'store'])->name('leave.store');
     Route::post('leave/{leaveRequest}/cancel', [LeaveController::class, 'cancelOwn'])->name('leave.cancel');
 
     Route::middleware('role:HR_ADMIN')->prefix('admin')->name('admin.')->group(function () {
-        Route::inertia('dashboard', 'Dashboard')->name('dashboard');
+        Route::get('dashboard', [HrDashboardController::class, 'index'])->name('dashboard');
+        Route::post('attendance/{attendanceLog}/review', [HrDashboardController::class, 'reviewAttendance'])->name('attendance.review');
+        Route::post('attendance/{attendanceLog}/correct', [HrDashboardController::class, 'correctAttendanceStatus'])->name('attendance.correct');
+        Route::post('visits/{salesVisit}/review', [HrDashboardController::class, 'reviewVisit'])->name('visits.review');
+        Route::post('reviews/bulk-approve', [HrDashboardController::class, 'bulkApprove'])->name('reviews.bulk-approve');
+        Route::post('attendance/manual', [HrDashboardController::class, 'storeManualAttendance'])->name('attendance.manual');
+
+        Route::get('exports/talenta-office', [ExportController::class, 'talentaOffice'])->name('exports.talenta-office');
+        Route::get('exports/sales-visits', [ExportController::class, 'salesVisits'])->name('exports.sales-visits');
+        Route::get('exports/audit', [ExportController::class, 'auditInternal'])->name('exports.audit');
 
         Route::get('leaves', [LeaveApprovalController::class, 'index'])->name('leaves.index');
         Route::post('leaves/{leaveRequest}/approve', [LeaveApprovalController::class, 'approve'])->name('leaves.approve');
