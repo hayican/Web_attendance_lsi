@@ -20,6 +20,7 @@ use Illuminate\Support\Carbon;
  * @property string|null $destination_location
  * @property string|null $scheduled_start_time
  * @property LeaveStatus $status
+ * @property-read User $user
  */
 #[Fillable([
     'user_id',

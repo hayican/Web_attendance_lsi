@@ -6,6 +6,17 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+/**
+ * @property int $id
+ * @property int $user_id
+ * @property int $year
+ * @property string $base_quota
+ * @property string $prorated_deduction
+ * @property string $collective_leave_deduction
+ * @property string $used_days
+ * @property string $pending_days
+ * @property string $adjustment_days
+ */
 #[Fillable([
     'user_id',
     'year',

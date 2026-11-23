@@ -1,9 +1,12 @@
 <?php
 
 use App\Enums\UserRole;
+use App\Http\Controllers\Admin\LeaveApprovalController;
+use App\Http\Controllers\Admin\MasterDataController;
 use App\Http\Controllers\Attendance\OfficeAttendanceController;
 use App\Http\Controllers\Attendance\SalesVisitController;
 use App\Http\Controllers\Auth\ConsentController;
+use App\Http\Controllers\Leave\LeaveController;
 use App\Http\Controllers\Security\EvidenceController;
 use App\Http\Controllers\Security\TokenController;
 use App\Models\User;
@@ -45,8 +48,35 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
         Route::post('attendance/sales/{visit}/visit-out', [SalesVisitController::class, 'visitOut'])->name('attendance.sales.visit-out');
     });
 
-    Route::middleware('role:HR_ADMIN')->group(function () {
-        Route::inertia('admin/dashboard', 'Dashboard')->name('admin.dashboard');
+    Route::get('leave', [LeaveController::class, 'index'])->name('leave.index');
+    Route::post('leave', [LeaveController::class, 'store'])->name('leave.store');
+    Route::post('leave/{leaveRequest}/cancel', [LeaveController::class, 'cancelOwn'])->name('leave.cancel');
+
+    Route::middleware('role:HR_ADMIN')->prefix('admin')->name('admin.')->group(function () {
+        Route::inertia('dashboard', 'Dashboard')->name('dashboard');
+
+        Route::get('leaves', [LeaveApprovalController::class, 'index'])->name('leaves.index');
+        Route::post('leaves/{leaveRequest}/approve', [LeaveApprovalController::class, 'approve'])->name('leaves.approve');
+        Route::post('leaves/{leaveRequest}/reject', [LeaveApprovalController::class, 'reject'])->name('leaves.reject');
+        Route::post('leaves/{leaveRequest}/partial-cancel', [LeaveApprovalController::class, 'partialCancel'])->name('leaves.partial-cancel');
+
+        Route::get('master-data', [MasterDataController::class, 'index'])->name('master-data');
+        Route::post('users', [MasterDataController::class, 'storeUser'])->name('users.store');
+        Route::patch('users/{user}', [MasterDataController::class, 'updateUser'])->name('users.update');
+        Route::post('users/{user}/reset-password', [MasterDataController::class, 'resetPassword'])->name('users.reset-password');
+        Route::post('users/{user}/unlock', [MasterDataController::class, 'unlockUser'])->name('users.unlock');
+        Route::post('users/{user}/leave-balance', [MasterDataController::class, 'adjustLeaveBalance'])->name('users.leave-balance');
+        Route::post('users/leave-balances/import', [MasterDataController::class, 'importLeaveBalancesCsv'])->name('users.leave-balances.import');
+        Route::post('users/{user}/schedule-override', [MasterDataController::class, 'overrideSchedule'])->name('users.schedule-override');
+
+        Route::post('holidays', [MasterDataController::class, 'storeHoliday'])->name('holidays.store');
+        Route::post('locations/{location}/verify-noo', [MasterDataController::class, 'verifyNooOutlet'])->name('locations.verify-noo');
+        Route::post('locations/{location}/deactivate', [MasterDataController::class, 'deactivateLocation'])->name('locations.deactivate');
+        Route::post('shifts/{shift}/deactivate', [MasterDataController::class, 'deactivateShift'])->name('shifts.deactivate');
+
+        Route::get('talenta-mapping', [MasterDataController::class, 'talentaMappingIndex'])->name('talenta-mapping.index');
+        Route::patch('talenta-mapping/{talentaMapping}', [MasterDataController::class, 'updateTalentaMapping'])->name('talenta-mapping.update');
+        Route::get('audit-logs', [MasterDataController::class, 'auditLogsIndex'])->name('audit-logs.index');
     });
 
     Route::post('api/tokens/gps', [TokenController::class, 'issueGps'])->name('tokens.gps');

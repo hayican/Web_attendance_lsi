@@ -6,7 +6,15 @@ use App\Enums\HolidayType;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property Carbon $holiday_date
+ * @property int|null $location_id
+ * @property string $description
+ * @property HolidayType $holiday_type
+ */
 #[Fillable([
     'holiday_date',
     'location_id',

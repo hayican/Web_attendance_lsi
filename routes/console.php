@@ -9,3 +9,6 @@ Artisan::command('inspire', function () {
 })->purpose('Display an inspiring quote');
 
 Schedule::command('attendance:close-missed')->everyFifteenMinutes()->withoutOverlapping();
+Schedule::command('attendance:generate-schedules')->monthlyOn(1, '00:10')->withoutOverlapping();
+Schedule::command('leave:annual-maintenance')->dailyAt('00:05')->withoutOverlapping();
+Schedule::command('attendance:prune-retention')->dailyAt('02:00')->withoutOverlapping();
