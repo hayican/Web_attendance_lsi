@@ -119,9 +119,15 @@ class LeaveBalanceService
         return $count;
     }
 
-    public function syncCollectiveLeaveForYear(int $year): void
+    /**
+     * @return list<array{balance: LeaveBalance, old: float, new: float}>
+     */
+    public function syncCollectiveLeaveForYear(int $year): array
     {
+        $today = CarbonImmutable::now('Asia/Jakarta');
+        $asOf = $year <= $today->year ? $today : null;
         $users = User::query()->where('is_active', true)->get();
+        $changes = [];
 
         foreach ($users as $user) {
             $balance = LeaveBalance::query()
@@ -130,15 +136,34 @@ class LeaveBalanceService
                 ->first();
 
             if ($balance === null) {
-                $this->ensureBalanceForYear($user, $year);
+                $created = $this->ensureBalanceForYear($user, $year, $asOf);
+                if ((float) $created->collective_leave_deduction > 0.0) {
+                    $changes[] = [
+                        'balance' => $created,
+                        'old' => 0.0,
+                        'new' => (float) $created->collective_leave_deduction,
+                    ];
+                }
 
                 continue;
             }
 
-            $balance->update([
-                'collective_leave_deduction' => $this->countCollectiveLeaveForUser($user, $year),
-            ]);
+            $oldDeduction = (float) $balance->collective_leave_deduction;
+            $newDeduction = $this->countCollectiveLeaveForUser($user, $year);
+
+            if ($oldDeduction !== $newDeduction) {
+                $balance->update([
+                    'collective_leave_deduction' => $newDeduction,
+                ]);
+                $changes[] = [
+                    'balance' => $balance,
+                    'old' => $oldDeduction,
+                    'new' => $newDeduction,
+                ];
+            }
         }
+
+        return $changes;
     }
 
     public function isEffectiveWorkDay(User $user, string $date): bool

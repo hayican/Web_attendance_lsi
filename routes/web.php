@@ -84,9 +84,27 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
         Route::post('users/{user}/schedule-override', [MasterDataController::class, 'overrideSchedule'])->name('users.schedule-override');
 
         Route::post('holidays', [MasterDataController::class, 'storeHoliday'])->name('holidays.store');
+        Route::patch('holidays/{holiday}', [MasterDataController::class, 'updateHoliday'])->name('holidays.update');
+        Route::delete('holidays/{holiday}', [MasterDataController::class, 'destroyHoliday'])->name('holidays.destroy');
+
+        Route::post('locations', [MasterDataController::class, 'storeLocation'])->name('locations.store');
+        Route::patch('locations/{location}', [MasterDataController::class, 'updateLocation'])->name('locations.update');
+        Route::post('locations/outlets/import', [MasterDataController::class, 'importOutletsCsv'])->name('locations.outlets.import');
         Route::post('locations/{location}/verify-noo', [MasterDataController::class, 'verifyNooOutlet'])->name('locations.verify-noo');
         Route::post('locations/{location}/deactivate', [MasterDataController::class, 'deactivateLocation'])->name('locations.deactivate');
+
+        Route::post('shifts', [MasterDataController::class, 'storeShift'])->name('shifts.store');
+        Route::patch('shifts/{shift}', [MasterDataController::class, 'updateShift'])->name('shifts.update');
         Route::post('shifts/{shift}/deactivate', [MasterDataController::class, 'deactivateShift'])->name('shifts.deactivate');
+
+        Route::post('shift-patterns', [MasterDataController::class, 'storeShiftPattern'])->name('shift-patterns.store');
+        Route::patch('shift-patterns/{shiftPattern}', [MasterDataController::class, 'updateShiftPattern'])->name('shift-patterns.update');
+        Route::post('shift-patterns/{shiftPattern}/generate', [MasterDataController::class, 'generateSchedulesForPattern'])->name('shift-patterns.generate');
+        Route::post('shift-patterns/{shiftPattern}/deactivate', [MasterDataController::class, 'deactivateShiftPattern'])->name('shift-patterns.deactivate');
+
+        Route::post('activity-categories', [MasterDataController::class, 'storeActivityCategory'])->name('activity-categories.store');
+        Route::patch('activity-categories/{activityCategory}', [MasterDataController::class, 'updateActivityCategory'])->name('activity-categories.update');
+        Route::post('activity-categories/{activityCategory}/deactivate', [MasterDataController::class, 'deactivateActivityCategory'])->name('activity-categories.deactivate');
 
         Route::get('talenta-mapping', [MasterDataController::class, 'talentaMappingIndex'])->name('talenta-mapping.index');
         Route::patch('talenta-mapping/{talentaMapping}', [MasterDataController::class, 'updateTalentaMapping'])->name('talenta-mapping.update');
