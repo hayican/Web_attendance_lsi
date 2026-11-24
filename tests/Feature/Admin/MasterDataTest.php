@@ -16,6 +16,7 @@ use App\Models\LeaveRequest;
 use App\Models\LeaveRequestDay;
 use App\Models\Location;
 use App\Models\Shift;
+use App\Models\TalentaMapping;
 use App\Models\User;
 use App\Models\UserShiftSchedule;
 use App\Services\LoginThrottleService;
@@ -325,4 +326,105 @@ test('holiday create update and delete trigger recalculateLeaveRequestDays and t
     expect((float) $senior->leaveBalances()->where('year', 2026)->value('pending_days'))->toBe(3.0);
 
     CarbonImmutable::setTestNow();
+});
+
+test('manual balance adjustment and atomic CSV import preserve used/pending days and block invalid rows', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-01 09:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE]);
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id, 'join_date' => '2024-01-01']);
+    $emp = User::factory()->create(['nik' => 'EMP888', 'role' => UserRole::EMPLOYEE_OFFICE, 'office_location_id' => $office->id, 'join_date' => '2024-01-01']);
+    $newHire = User::factory()->create(['nik' => 'EMP889', 'role' => UserRole::EMPLOYEE_OFFICE, 'office_location_id' => $office->id, 'join_date' => '2025-07-10']);
+
+    LeaveBalance::query()->create([
+        'user_id' => $emp->id,
+        'year' => 2026,
+        'base_quota' => 12,
+        'prorated_deduction' => 0,
+        'collective_leave_deduction' => 0,
+        'used_days' => 2,
+        'pending_days' => 1,
+        'adjustment_days' => 0,
+    ]);
+
+    // Self-adjustment forbidden
+    $this->actingAs($hr)->postJson("/admin/users/{$hr->id}/leave-balance", [
+        'year' => 2026,
+        'adjustment_days' => 5,
+        'reason' => 'Self test',
+    ])->assertForbidden();
+
+    // Manual adjustment updates only adjustment_days and logs audit
+    $this->actingAs($hr)->postJson("/admin/users/{$emp->id}/leave-balance", [
+        'year' => 2026,
+        'adjustment_days' => 3.5,
+        'reason' => 'Tambahan cuti penghargaan',
+    ])->assertOk()->assertJsonPath('leave_balance.adjustment_days', '3.5');
+
+    $empBal = $emp->leaveBalances()->where('year', 2026)->firstOrFail();
+    expect((float) $empBal->used_days)->toBe(2.0)->and((float) $empBal->pending_days)->toBe(1.0);
+
+    // Atomic all-or-nothing: second row unknown NIK rolls back EMP888 change
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'year' => 2026,
+        'rows' => [
+            ['nik' => 'EMP888', 'adjustment_days' => 1.0],
+            ['nik' => 'NO_SUCH_NIK', 'adjustment_days' => 2.0],
+        ],
+    ])->assertUnprocessable();
+
+    expect((float) $empBal->fresh()->adjustment_days)->toBe(3.5);
+
+    // Valid batch updates EMP888 & EMP889 without granting premature base_quota to <1 yr hire
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'year' => 2026,
+        'rows' => [
+            ['nik' => 'EMP888', 'adjustment_days' => -1.5],
+            ['nik' => 'EMP889', 'adjustment_days' => 1.0],
+        ],
+    ])->assertOk()->assertJsonPath('updated_count', 2);
+
+    $empBal->refresh();
+    $newBal = $newHire->leaveBalances()->where('year', 2026)->firstOrFail();
+    expect((float) $empBal->adjustment_days)->toBe(-1.5)
+        ->and((float) $empBal->used_days)->toBe(2.0)
+        ->and((float) $empBal->pending_days)->toBe(1.0)
+        ->and((float) $newBal->base_quota)->toBe(0.0)
+        ->and((float) $newBal->adjustment_days)->toBe(1.0);
+
+    CarbonImmutable::setTestNow();
+});
+
+test('HR can view all 9 Talenta mappings, update code and boolean options with validation and audit logging', function () {
+    $office = Location::factory()->create(['type' => LocationType::OFFICE]);
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id]);
+
+    // Visiting /admin/talenta-mapping auto-seeds all 9 canonical PRD keys
+    $this->actingAs($hr)->get('/admin/talenta-mapping')->assertOk();
+    expect(TalentaMapping::query()->count())->toBe(9);
+
+    $present = TalentaMapping::query()->where('mapping_key', 'attendance_present')->firstOrFail();
+    $overtimeOpt = TalentaMapping::query()->where('mapping_key', 'export_offday_overtime_to_talenta')->firstOrFail();
+
+    // Formula prefix blocked on text mapping
+    $this->actingAs($hr)->patchJson("/admin/talenta-mapping/{$present->id}", [
+        'mapping_value' => '=CMD()',
+    ])->assertUnprocessable();
+
+    // Invalid boolean value blocked on option key
+    $this->actingAs($hr)->patchJson("/admin/talenta-mapping/{$overtimeOpt->id}", [
+        'mapping_value' => 'yes',
+    ])->assertUnprocessable();
+
+    $this->actingAs($hr)->patchJson("/admin/talenta-mapping/{$present->id}", [
+        'mapping_value' => 'PRS',
+        'description' => 'Hadir Kantor',
+    ])->assertOk()->assertJsonPath('mapping.mapping_value', 'PRS');
+
+    $this->actingAs($hr)->patchJson("/admin/talenta-mapping/{$overtimeOpt->id}", [
+        'mapping_value' => 'true',
+    ])->assertOk()->assertJsonPath('mapping.mapping_value', 'true');
+
+    expect(AuditLog::query()->where('entity', 'talenta_mappings')->where('record_id', $present->id)->exists())->toBeTrue();
+    expect(AuditLog::query()->where('entity', 'talenta_mappings')->where('record_id', $overtimeOpt->id)->exists())->toBeTrue();
 });

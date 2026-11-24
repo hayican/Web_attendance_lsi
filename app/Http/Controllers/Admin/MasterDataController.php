@@ -92,8 +92,13 @@ class MasterDataController extends Controller
 
     public function talentaMappingIndex(): Response
     {
+        TalentaMapping::ensureDefaults();
+
         return Inertia::render('admin/TalentaMapping', [
-            'mappings' => TalentaMapping::query()->orderBy('mapping_key')->get(),
+            'mappings' => TalentaMapping::query()
+                ->with('updater:id,nik,name')
+                ->orderBy('mapping_key')
+                ->get(),
         ]);
     }
 
@@ -102,15 +107,28 @@ class MasterDataController extends Controller
         /** @var User $actor */
         $actor = $request->user();
 
+        $isBooleanOption = in_array($talentaMapping->mapping_key, TalentaMapping::BOOLEAN_KEYS, true);
+
         $validated = $request->validate([
-            'mapping_value' => ['required', 'string', 'max:100'],
+            'mapping_value' => $isBooleanOption
+                ? ['required', 'string', Rule::in(['true', 'false'])]
+                : ['required', 'string', 'max:100'],
             'description' => ['nullable', 'string', 'max:255'],
         ]);
 
+        $newValue = trim((string) $validated['mapping_value']);
+        if (! $isBooleanOption && $this->csvSanitizer->hasFormulaPrefix($newValue)) {
+            throw ValidationException::withMessages([
+                'mapping_value' => ['Kode mapping tidak boleh diawali karakter formula (=, +, -, @).'],
+            ]);
+        }
+
         $old = ['mapping_value' => $talentaMapping->mapping_value, 'description' => $talentaMapping->description];
         $talentaMapping->update([
-            'mapping_value' => trim((string) $validated['mapping_value']),
-            'description' => isset($validated['description']) ? trim((string) $validated['description']) : $talentaMapping->description,
+            'mapping_value' => $newValue,
+            'description' => array_key_exists('description', $validated) && $validated['description'] !== null
+                ? trim((string) $validated['description'])
+                : $talentaMapping->description,
             'updated_by' => $actor->id,
         ]);
 
@@ -123,7 +141,7 @@ class MasterDataController extends Controller
             newValues: ['mapping_value' => $talentaMapping->mapping_value, 'description' => $talentaMapping->description],
         );
 
-        return response()->json(['mapping' => $talentaMapping->fresh()]);
+        return response()->json(['mapping' => $talentaMapping->fresh('updater:id,nik,name')]);
     }
 
     public function auditLogsIndex(): Response
@@ -417,7 +435,11 @@ class MasterDataController extends Controller
             'reason' => ['required', 'string', 'min:3', 'max:500'],
         ]);
 
-        $balance = $this->balanceService->ensureBalanceForYear($user, (int) $validated['year']);
+        $year = (int) $validated['year'];
+        $today = CarbonImmutable::now('Asia/Jakarta');
+        $asOf = $year <= $today->year ? $today : null;
+
+        $balance = $this->balanceService->ensureBalanceForYear($user, $year, $asOf);
         $oldAdjustment = (float) $balance->adjustment_days;
 
         $balance->update(['adjustment_days' => (float) $validated['adjustment_days']]);
@@ -445,13 +467,17 @@ class MasterDataController extends Controller
             'rows' => ['required', 'array', 'min:1'],
             'rows.*.nik' => ['required', 'string'],
             'rows.*.adjustment_days' => ['required', 'numeric', 'between:-30,30'],
+            'rows.*.base_quota' => ['nullable', 'numeric', 'between:0,30'],
+            'rows.*.prorated_deduction' => ['nullable', 'numeric', 'between:0,12'],
         ]);
 
         $year = (int) $validated['year'];
+        $today = CarbonImmutable::now('Asia/Jakarta');
+        $asOf = $year <= $today->year ? $today : null;
         $updated = 0;
 
-        DB::transaction(function () use ($validated, $actor, $year, &$updated): void {
-            foreach ($validated['rows'] as $row) {
+        DB::transaction(function () use ($validated, $actor, $year, $asOf, &$updated): void {
+            foreach ($validated['rows'] as $idx => $row) {
                 $nikRaw = (string) $row['nik'];
                 if ($this->csvSanitizer->hasFormulaPrefix($nikRaw)) {
                     throw ValidationException::withMessages([
@@ -459,22 +485,38 @@ class MasterDataController extends Controller
                     ]);
                 }
 
-                $target = User::query()->where('nik', strtoupper(trim($nikRaw)))->first();
-                if ($target === null || $target->id === $actor->id) {
+                $nik = strtoupper(trim($nikRaw));
+                $target = User::query()->where('nik', $nik)->first();
+                if ($target === null) {
+                    throw ValidationException::withMessages([
+                        'rows' => ['NIK tidak ditemukan pada baris '.($idx + 1).": {$nik}"],
+                    ]);
+                }
+
+                if ($target->id === $actor->id) {
                     continue;
                 }
 
-                $bal = $this->balanceService->ensureBalanceForYear($target, $year);
-                $old = (float) $bal->adjustment_days;
-                $bal->update(['adjustment_days' => (float) $row['adjustment_days']]);
+                $bal = $this->balanceService->ensureBalanceForYear($target, $year, $asOf);
+                $old = $bal->only(['adjustment_days', 'base_quota', 'prorated_deduction']);
+                $updates = ['adjustment_days' => (float) $row['adjustment_days']];
+
+                if (array_key_exists('base_quota', $row) && $row['base_quota'] !== null) {
+                    $updates['base_quota'] = (float) $row['base_quota'];
+                }
+                if (array_key_exists('prorated_deduction', $row) && $row['prorated_deduction'] !== null) {
+                    $updates['prorated_deduction'] = (float) $row['prorated_deduction'];
+                }
+
+                $bal->update($updates);
 
                 $this->audit->log(
                     actorId: $actor->id,
                     entity: 'leave_balances',
                     recordId: $bal->id,
                     action: AuditAction::BULK_IMPORT,
-                    oldValues: ['adjustment_days' => $old],
-                    newValues: ['adjustment_days' => (float) $row['adjustment_days']],
+                    oldValues: $old,
+                    newValues: $bal->only(['adjustment_days', 'base_quota', 'prorated_deduction']),
                     reason: 'Bulk import saldo awal cuti Talenta',
                 );
                 $updated++;

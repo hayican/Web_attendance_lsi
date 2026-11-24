@@ -191,19 +191,7 @@ class DatabaseSeeder extends Seeder
             );
         }
 
-        foreach ([
-            ['mapping_key' => 'attendance_present', 'mapping_value' => 'H', 'description' => 'Kode Hadir Talenta'],
-            ['mapping_key' => 'attendance_absent', 'mapping_value' => 'A', 'description' => 'Kode Alpa Talenta'],
-            ['mapping_key' => 'timeoff_annual', 'mapping_value' => 'CT', 'description' => 'Kode Cuti Tahunan Talenta'],
-            ['mapping_key' => 'timeoff_collective', 'mapping_value' => 'CB', 'description' => 'Kode Cuti Bersama Talenta'],
-            ['mapping_key' => 'timeoff_izin', 'mapping_value' => 'IZ', 'description' => 'Kode Izin Talenta'],
-            ['mapping_key' => 'timeoff_sakit', 'mapping_value' => 'SK', 'description' => 'Kode Sakit Talenta'],
-        ] as $mapping) {
-            TalentaMapping::query()->firstOrCreate(
-                ['mapping_key' => $mapping['mapping_key']],
-                ['mapping_value' => $mapping['mapping_value'], 'description' => $mapping['description']]
-            );
-        }
+        TalentaMapping::ensureDefaults();
 
         $defaultPassword = Hash::make('password');
 

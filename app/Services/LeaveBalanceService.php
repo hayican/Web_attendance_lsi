@@ -35,7 +35,7 @@ class LeaveBalanceService
         $joinDate = CarbonImmutable::parse($user->join_date->toDateString());
         $oneYearDate = $this->oneYearAnniversary($joinDate);
 
-        return $asOf->greaterThanOrEqualTo($oneYearDate);
+        return $asOf->toDateString() >= $oneYearDate->toDateString();
     }
 
     /**
@@ -47,7 +47,7 @@ class LeaveBalanceService
         $oneYearDate = $this->oneYearAnniversary($joinDate);
         $referenceDate = $asOf ?? CarbonImmutable::create($year, 12, 31);
 
-        if ($referenceDate->lessThan($oneYearDate)) {
+        if ($referenceDate->toDateString() < $oneYearDate->toDateString()) {
             return ['base_quota' => 0.0, 'prorated_deduction' => 0.0];
         }
 
@@ -74,7 +74,9 @@ class LeaveBalanceService
             ->first();
 
         $quota = $this->calculateAnnualQuotaAndProration($user, $year, $asOf);
-        $collectiveDeduction = $this->countCollectiveLeaveForUser($user, $year);
+        $collectiveDeduction = $quota['base_quota'] > 0.0
+            ? $this->countCollectiveLeaveForUser($user, $year)
+            : 0.0;
 
         if ($existing !== null) {
             $existing->update([
@@ -149,7 +151,9 @@ class LeaveBalanceService
             }
 
             $oldDeduction = (float) $balance->collective_leave_deduction;
-            $newDeduction = $this->countCollectiveLeaveForUser($user, $year);
+            $newDeduction = ($asOf === null || $this->isEligibleForAnnualLeave($user, $asOf))
+                ? $this->countCollectiveLeaveForUser($user, $year)
+                : 0.0;
 
             if ($oldDeduction !== $newDeduction) {
                 $balance->update([

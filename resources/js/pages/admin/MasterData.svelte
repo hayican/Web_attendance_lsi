@@ -134,6 +134,9 @@
     }: MasterDataProps = $props();
 
     const currentUserId = $derived(page.props.auth.user?.id ?? 0);
+    const currentUserNik = $derived(
+        (page.props.auth.user as { nik?: string } | undefined)?.nik?.toUpperCase() ?? '',
+    );
 
     type TabKey =
         | 'users'
@@ -448,24 +451,51 @@
 
     let csvBalanceOpen = $state(false);
     let csvBalanceYear = $state(0);
-    let csvBalanceText = $state('EMP001,2\nEMP002,-1');
-    const csvBalanceRows = $derived(
-        csvBalanceText
+    let csvBalanceText = $state('nik,adjustment_days\nOFF001,2\nSLS001,-1');
+    const csvBalanceRows = $derived.by(() => {
+        const lines = csvBalanceText
             .split(/\r?\n/)
             .map((l) => l.trim())
-            .filter(Boolean)
+            .filter(Boolean);
+
+        return lines
+            .filter((line, idx) => {
+                if (idx !== 0) return true;
+                const firstCell = line.split(/[,;]/)[0]?.trim().toLowerCase() ?? '';
+                return firstCell !== 'nik';
+            })
             .map((line) => {
-                const [nik = '', adj = '0'] = line
+                const [nikRaw = '', adjRaw = '', baseRaw = '', prorataRaw = ''] = line
                     .split(/[,;]/)
                     .map((s) => s.trim());
-                const unsafe = /^[=+\-@]/.test(nik);
+                const nikUpper = nikRaw.toUpperCase();
+                const formulaUnsafe =
+                    /^[=+\-@\t\r]/.test(nikRaw) ||
+                    /^[=+@\t\r]/.test(adjRaw) ||
+                    (/^-/.test(adjRaw) && Number.isNaN(Number(adjRaw)));
+                const adjNum = Number(adjRaw);
+                const invalidAdj = adjRaw === '' || Number.isNaN(adjNum) || adjNum < -30 || adjNum > 30;
+                const matchedUser = users.find((u) => u.nik.toUpperCase() === nikUpper);
+                const isSelf = nikUpper !== '' && nikUpper === currentUserNik;
+                const notFound = !formulaUnsafe && !matchedUser;
+                const baseNum = baseRaw !== '' ? Number(baseRaw) : null;
+                const prorataNum = prorataRaw !== '' ? Number(prorataRaw) : null;
+
                 return {
-                    nik,
-                    adjustment_days: Number(adj) || 0,
-                    unsafe,
+                    nik: nikRaw,
+                    userName: matchedUser?.name ?? '-',
+                    adjustment_days: invalidAdj ? 0 : adjNum,
+                    base_quota: baseNum !== null && !Number.isNaN(baseNum) ? baseNum : null,
+                    prorated_deduction:
+                        prorataNum !== null && !Number.isNaN(prorataNum) ? prorataNum : null,
+                    unsafe: formulaUnsafe,
+                    invalidAdj,
+                    notFound,
+                    isSelf,
+                    hasError: formulaUnsafe || invalidAdj || notFound,
                 };
-            }),
-    );
+            });
+    });
 
     // --- Shift Modal State ---
     let shiftModalOpen = $state(false);
@@ -1713,9 +1743,20 @@
 
 <!-- MODAL: ADJUST LEAVE BALANCE -->
 {#if balanceTarget}
+    {@const curBal = balanceTarget.leave_balances?.[0]}
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
         <div class="w-full max-w-sm rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
             <h3 class="text-sm font-semibold">Penyesuaian Saldo Cuti: {balanceTarget.nik}</h3>
+            {#if curBal}
+                <div class="mt-2 grid grid-cols-3 gap-1 rounded border border-stone-200 bg-stone-50 p-2 font-mono text-[11px] text-stone-700">
+                    <span>Jatah: {curBal.base_quota}</span>
+                    <span>Prorata: -{curBal.prorated_deduction}</span>
+                    <span>Cutber: -{curBal.collective_leave_deduction}</span>
+                    <span>Terpakai: {curBal.used_days}</span>
+                    <span>Pending: {curBal.pending_days}</span>
+                    <span>Adj: {curBal.adjustment_days}</span>
+                </div>
+            {/if}
             <div class="mt-3 space-y-2 text-xs">
                 <label class="block">
                     <span class="mb-1 block font-medium">Tahun</span>
@@ -1812,7 +1853,9 @@
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
         <div class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
             <h3 class="text-sm font-semibold">Impor CSV Saldo Awal Cuti</h3>
-            <p class="mt-1 text-xs text-stone-600">Format: `NIK,adjustment_days` per baris (atomik all-or-nothing).</p>
+            <p class="mt-1 text-xs text-stone-600">
+                Format: `nik,adjustment_days` (opsional `,base_quota,prorated_deduction`). Transaksi atomik all-or-nothing, `used_days` &amp; `pending_days` tetap utuh.
+            </p>
             <div class="mt-3 space-y-2 text-xs">
                 <div class="flex items-center gap-2">
                     <label class="flex items-center gap-2 font-medium">
@@ -1822,19 +1865,31 @@
                     <input type="file" accept=".csv,text/csv" onchange={(e) => readCsvFile(e, (t) => (csvBalanceText = t))} />
                 </div>
                 <textarea bind:value={csvBalanceText} rows="4" class="w-full rounded-md border border-stone-300 p-2 font-mono text-xs"></textarea>
-                <div class="max-h-40 overflow-y-auto rounded border border-stone-200">
+                <div class="max-h-44 overflow-y-auto rounded border border-stone-200">
                     <table class="w-full text-left text-xs">
                         <thead class="bg-stone-100">
-                            <tr><th class="px-2 py-1">NIK</th><th class="px-2 py-1">Adjustment</th><th class="px-2 py-1">Validasi</th></tr>
+                            <tr>
+                                <th class="px-2 py-1">NIK</th>
+                                <th class="px-2 py-1">Nama</th>
+                                <th class="px-2 py-1">Adjustment</th>
+                                <th class="px-2 py-1">Validasi</th>
+                            </tr>
                         </thead>
                         <tbody class="divide-y divide-stone-200">
                             {#each csvBalanceRows as row, idx (idx)}
                                 <tr>
                                     <td class="px-2 py-1 font-mono">{row.nik}</td>
+                                    <td class="px-2 py-1">{row.userName}</td>
                                     <td class="px-2 py-1 font-mono">{row.adjustment_days}</td>
                                     <td class="px-2 py-1">
                                         {#if row.unsafe}
                                             <span class="text-red-700">Formula berbahaya!</span>
+                                        {:else if row.invalidAdj}
+                                            <span class="text-red-700">Angka di luar -30..30</span>
+                                        {:else if row.notFound}
+                                            <span class="text-red-700">NIK tidak ditemukan</span>
+                                        {:else if row.isSelf}
+                                            <span class="text-yellow-800">Akun sendiri (dilewati)</span>
                                         {:else}
                                             <span class="text-green-700">Siap</span>
                                         {/if}
@@ -1849,13 +1904,21 @@
                 <Button size="sm" variant="outline" onclick={() => (csvBalanceOpen = false)}>Batal</Button>
                 <Button
                     size="sm"
-                    disabled={busy || csvBalanceRows.length === 0 || csvBalanceRows.some((r) => r.unsafe)}
+                    disabled={busy || csvBalanceRows.length === 0 || csvBalanceRows.some((r) => r.hasError)}
                     class="bg-[#6F3E1D] text-white hover:bg-[#583015]"
                     onclick={async () => {
                         const ok = await sendJson(
                             '/admin/users/leave-balances/import',
                             'POST',
-                            { year: Number(csvBalanceYear), rows: csvBalanceRows },
+                            {
+                                year: Number(csvBalanceYear),
+                                rows: csvBalanceRows.map((r) => ({
+                                    nik: r.nik,
+                                    adjustment_days: r.adjustment_days,
+                                    base_quota: r.base_quota,
+                                    prorated_deduction: r.prorated_deduction,
+                                })),
+                            },
                             'Saldo cuti CSV berhasil diimpor.',
                         );
                         if (ok) csvBalanceOpen = false;

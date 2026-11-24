@@ -184,3 +184,59 @@ test('SAKIT requires SKD, DINAS_LUAR forbidden for sales, monthly > 2 days requi
 
     CarbonImmutable::setTestNow();
 });
+
+test('annual maintenance scheduler handles 1-year anniversary proration, Feb 29 leap rule, and Jan 1 reset for < 1 year employees', function () {
+    $julyHire = makePatternedUser('2025-07-10');
+    $leapHire = makePatternedUser('2024-02-29');
+    $juniorNextYear = makePatternedUser('2026-06-01');
+
+    // Pre-existing collective leave in Aug 2026 & Aug 2027
+    Holiday::query()->create([
+        'holiday_date' => '2026-08-18',
+        'description' => 'Cuti Bersama 2026',
+        'holiday_type' => HolidayType::COLLECTIVE_LEAVE,
+    ]);
+    Holiday::query()->create([
+        'holiday_date' => '2027-08-18',
+        'description' => 'Cuti Bersama 2027',
+        'holiday_type' => HolidayType::COLLECTIVE_LEAVE,
+    ]);
+
+    // Feb 28, 2025: leapHire turns 1 year (Feb 29 -> Feb 28 in non-leap year 2025)
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2025-02-28 00:05:00', 'Asia/Jakarta'));
+    $this->artisan('leave:annual-maintenance')->assertSuccessful();
+    $leapBal = LeaveBalance::query()->where('user_id', $leapHire->id)->where('year', 2025)->firstOrFail();
+    expect((float) $leapBal->base_quota)->toBe(12.0)->and((float) $leapBal->prorated_deduction)->toBe(2.0);
+
+    // July 9, 2026 (day before anniversary): julyHire still has 0 quota & 0 collective deduction
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-07-09 00:05:00', 'Asia/Jakarta'));
+    $this->artisan('leave:annual-maintenance')->assertSuccessful();
+    $julyBal = LeaveBalance::query()->where('user_id', $julyHire->id)->where('year', 2026)->firstOrFail();
+    expect((float) $julyBal->base_quota)->toBe(0.0)->and((float) $julyBal->collective_leave_deduction)->toBe(0.0);
+
+    // July 10, 2026 (exact 1-year anniversary): julyHire gets 12 - 6 = 6 days & collective leave deduction 1
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-07-10 00:05:00', 'Asia/Jakarta'));
+    $this->artisan('leave:annual-maintenance')->assertSuccessful();
+    $julyBal->refresh();
+    expect((float) $julyBal->base_quota)->toBe(12.0)
+        ->and((float) $julyBal->prorated_deduction)->toBe(6.0)
+        ->and((float) $julyBal->collective_leave_deduction)->toBe(1.0);
+
+    // Jan 1, 2027 reset:
+    // - julyHire gets full 12 days (prorated_deduction = 0) + 2027 collective leave deduction = 1
+    // - juniorNextYear (< 1 yr on 2027-01-01) gets base_quota = 0, prorated = 0, collective = 0 (not negative!)
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2027-01-01 00:05:00', 'Asia/Jakarta'));
+    $this->artisan('leave:annual-maintenance')->assertSuccessful();
+
+    $july2027 = LeaveBalance::query()->where('user_id', $julyHire->id)->where('year', 2027)->firstOrFail();
+    $junior2027 = LeaveBalance::query()->where('user_id', $juniorNextYear->id)->where('year', 2027)->firstOrFail();
+
+    expect((float) $july2027->base_quota)->toBe(12.0)
+        ->and((float) $july2027->prorated_deduction)->toBe(0.0)
+        ->and((float) $july2027->collective_leave_deduction)->toBe(1.0);
+    expect((float) $junior2027->base_quota)->toBe(0.0)
+        ->and((float) $junior2027->prorated_deduction)->toBe(0.0)
+        ->and((float) $junior2027->collective_leave_deduction)->toBe(0.0);
+
+    CarbonImmutable::setTestNow();
+});
