@@ -7,7 +7,42 @@ use App\Enums\VerificationStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $user_id
+ * @property int $location_id
+ * @property int|null $shift_id
+ * @property int|null $leave_request_id
+ * @property AttendanceSource $source
+ * @property Carbon $work_date
+ * @property int $attempt_no
+ * @property int|null $is_active_attempt
+ * @property Carbon|null $clock_in_at
+ * @property string|null $clock_in_photo_url
+ * @property string|null $clock_in_lat
+ * @property string|null $clock_in_lng
+ * @property string|null $clock_in_accuracy_m
+ * @property string|null $clock_in_distance_m
+ * @property string|null $clock_in_device_id
+ * @property Carbon|null $clock_out_at
+ * @property string|null $clock_out_photo_url
+ * @property string|null $clock_out_lat
+ * @property string|null $clock_out_lng
+ * @property string|null $clock_out_accuracy_m
+ * @property string|null $clock_out_distance_m
+ * @property string|null $clock_out_device_id
+ * @property int $late_minutes
+ * @property int $early_leave_minutes
+ * @property VerificationStatus $clock_in_status
+ * @property list<string>|null $clock_in_anomaly_flags
+ * @property VerificationStatus|null $clock_out_status
+ * @property list<string>|null $clock_out_anomaly_flags
+ * @property-read Location $location
+ * @property-read Shift|null $shift
+ * @property-read LeaveRequest|null $leaveRequest
+ */
 #[Fillable([
     'user_id',
     'location_id',

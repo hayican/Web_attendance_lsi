@@ -6,7 +6,18 @@ use App\Enums\ScheduleSource;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $user_id
+ * @property Carbon $work_date
+ * @property int|null $shift_id
+ * @property bool $is_day_off
+ * @property ScheduleSource $source
+ * @property int $created_by
+ * @property-read Shift|null $shift
+ */
 #[Fillable([
     'user_id',
     'work_date',

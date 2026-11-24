@@ -128,6 +128,40 @@ class ImageEvidenceService
         return $relativePath;
     }
 
+    /**
+     * Store a user's reference profile photo on private local storage.
+     *
+     * @throws ValidationException
+     */
+    public function storeReferencePhoto(UploadedFile $file, int $userId): string
+    {
+        $this->assertValidImage($file);
+
+        $realPath = $file->getRealPath();
+        if ($realPath === false) {
+            throw ValidationException::withMessages([
+                'photo' => ['Berkas foto tidak valid atau rusak.'],
+            ]);
+        }
+
+        try {
+            $image = ImageManager::usingDriver(GdDriver::class)->decodePath($realPath);
+        } catch (Throwable) {
+            throw ValidationException::withMessages([
+                'photo' => ['Berkas foto tidak valid atau rusak.'],
+            ]);
+        }
+
+        if ($image->width() > 800) {
+            $image->scale(width: 800);
+        }
+
+        $relativePath = sprintf('evidence/%d/reference/%s.jpg', $userId, (string) Str::uuid());
+        Storage::disk('local')->put($relativePath, (string) $image->encodeUsingFormat(Format::JPEG, quality: 85));
+
+        return $relativePath;
+    }
+
     public function signedUrl(string $relativePath, int $minutes = self::SIGNED_URL_MINUTES): string
     {
         return URL::temporarySignedRoute(
