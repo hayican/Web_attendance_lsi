@@ -60,7 +60,17 @@ services:
             - mysql_data:/var/lib/mysql
             - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
         healthcheck:
-            test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-u', 'root', '-p${DB_ROOT_PASSWORD:-root_secret}']
+            test:
+                [
+                    'CMD',
+                    'mysqladmin',
+                    'ping',
+                    '-h',
+                    'localhost',
+                    '-u',
+                    'root',
+                    '-p${DB_ROOT_PASSWORD:-root_secret}',
+                ]
             interval: 5s
             timeout: 5s
             retries: 15
@@ -91,7 +101,16 @@ services:
         container_name: lsi_attendance_queue
         restart: unless-stopped
         working_dir: /var/www/html
-        command: ['php', 'artisan', 'queue:work', 'redis', '--sleep=3', '--tries=3', '--max-time=3600']
+        command:
+            [
+                'php',
+                'artisan',
+                'queue:work',
+                'redis',
+                '--sleep=3',
+                '--tries=3',
+                '--max-time=3600',
+            ]
         volumes:
             - .:/var/www/html
             - attendance_private_storage:/var/www/html/storage/app/private

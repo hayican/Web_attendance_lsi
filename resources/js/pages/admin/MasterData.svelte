@@ -472,7 +472,7 @@
                 const formulaUnsafe =
                     /^[=+\-@\t\r]/.test(nikRaw) ||
                     /^[=+@\t\r]/.test(adjRaw) ||
-                    (/^-/.test(adjRaw) && Number.isNaN(Number(adjRaw)));
+                    (adjRaw.startsWith('-') && Number.isNaN(Number(adjRaw)));
                 const adjNum = Number(adjRaw);
                 const invalidAdj = adjRaw === '' || Number.isNaN(adjNum) || adjNum < -30 || adjNum > 30;
                 const matchedUser = users.find((u) => u.nik.toUpperCase() === nikUpper);
