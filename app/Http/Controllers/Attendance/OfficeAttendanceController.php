@@ -12,6 +12,7 @@ use App\Services\AntiFraudService;
 use App\Services\AttendanceHelperService;
 use App\Services\GeoLocationService;
 use App\Services\ImageEvidenceService;
+use App\Services\LeaveBalanceService;
 use App\Services\ScheduleResolverService;
 use App\Services\TokenGuardService;
 use Carbon\CarbonImmutable;
@@ -33,6 +34,7 @@ class OfficeAttendanceController extends Controller
         private readonly TokenGuardService $tokenGuard,
         private readonly ImageEvidenceService $imageEvidence,
         private readonly AttendanceHelperService $helper,
+        private readonly LeaveBalanceService $balanceService,
     ) {}
 
     public function index(Request $request): Response
@@ -50,10 +52,9 @@ class OfficeAttendanceController extends Controller
 
         $schedule = $this->scheduleResolver->resolveOrCreateSchedule($user, $workDate);
         $shift = $schedule?->shift;
-        $isHoliday = $this->scheduleResolver->isHoliday($workDate, $office->id);
-        $isDayOff = $isHoliday || ($schedule !== null && $schedule->is_day_off);
+        $isDayOff = ! $this->balanceService->isEffectiveWorkDay($user, $workDate) || $shift === null;
         $hasApprovedTimeOff = $this->scheduleResolver->hasApprovedTimeOff($user->id, $workDate);
-        $dinasLuar = $this->scheduleResolver->approvedDinasLuar($user->id, $workDate);
+        $dinasLuar = $this->scheduleResolver->dinasLuarForDate($user->id, $workDate);
 
         $activeLog = AttendanceLog::query()
             ->with(['location', 'shift'])
@@ -104,6 +105,7 @@ class OfficeAttendanceController extends Controller
                 'id' => $dinasLuar->id,
                 'destination_location' => $dinasLuar->destination_location,
                 'scheduled_start_time' => $dinasLuar->scheduled_start_time,
+                'status' => $dinasLuar->status->value,
             ] : null,
             'activeLog' => $activeLog,
             'rejectedLog' => $rejectedLog,
@@ -126,6 +128,7 @@ class OfficeAttendanceController extends Controller
             'camera_token' => ['required', 'string'],
             'photo' => ['required', 'file', 'max:2048'],
             'notes' => ['nullable', 'string', 'max:500'],
+            'is_late_permission' => ['nullable', 'boolean'],
         ]);
 
         $idempotencyKey = (string) $validated['idempotency_key'];
@@ -170,9 +173,9 @@ class OfficeAttendanceController extends Controller
 
         $schedule = $this->scheduleResolver->resolveOrCreateSchedule($user, $workDate);
         $shift = $schedule?->shift;
-        $isHoliday = $this->scheduleResolver->isHoliday($workDate, $office->id);
-        $isDayOff = $isHoliday || ($schedule !== null && $schedule->is_day_off) || $shift === null;
-        $dinasLuar = $this->scheduleResolver->approvedDinasLuar($user->id, $workDate);
+        $isEffectiveWorkDay = $this->balanceService->isEffectiveWorkDay($user, $workDate);
+        $isDayOff = ! $isEffectiveWorkDay || $shift === null;
+        $dinasLuar = $this->scheduleResolver->dinasLuarForDate($user->id, $workDate);
 
         $effectiveStart = $this->scheduleResolver->effectiveStartTime($workDate, $timezone, $shift, $dinasLuar);
         $effectiveEnd = $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
@@ -245,6 +248,25 @@ class OfficeAttendanceController extends Controller
             ]);
         }
 
+        $isLatePermission = (bool) ($validated['is_late_permission'] ?? false);
+        if ($isLatePermission) {
+            $latePermissionError = 'Izin masuk siang hanya berlaku saat terlambat pada hari kerja efektif tanpa Dinas Luar.';
+
+            if ($lateMinutes <= 0) {
+                throw ValidationException::withMessages(['is_late_permission' => [$latePermissionError]]);
+            }
+
+            if ($dinasLuar !== null) {
+                throw ValidationException::withMessages(['is_late_permission' => [$latePermissionError]]);
+            }
+
+            if (mb_strlen($notes) < 10) {
+                throw ValidationException::withMessages([
+                    'notes' => ['Alasan izin masuk siang wajib diisi minimal 10 karakter.'],
+                ]);
+            }
+        }
+
         $gpsTokenResult = $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
         $camTokenResult = $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
 
@@ -261,7 +283,17 @@ class OfficeAttendanceController extends Controller
             isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
         );
 
-        $flags = array_values(array_unique([...$geoEval['flags'], ...$fraud['flags']]));
+        $flags = [...$geoEval['flags'], ...$fraud['flags']];
+        if ($isDayOff) {
+            $flags[] = 'OFF_DAY_ATTENDANCE';
+        }
+        if ($dinasLuar !== null) {
+            $flags[] = 'OFFSITE_DUTY';
+        }
+        if ($isLatePermission) {
+            $flags[] = 'LATE_PERMISSION';
+        }
+        $flags = array_values(array_unique($flags));
         $needsReview = $flags !== [] || $isDayOff || $isRetryAfterEnd;
 
         /** @var UploadedFile $photo */
@@ -299,6 +331,8 @@ class OfficeAttendanceController extends Controller
                 $lateMinutes,
                 $needsReview,
                 $flags,
+                $effectiveStart,
+                $effectiveEnd,
             ): AttendanceLog {
                 $this->helper->cancelPendingLeaveDayOnPresence($user->id, $workDate);
 
@@ -307,6 +341,13 @@ class OfficeAttendanceController extends Controller
                     'location_id' => $office->id,
                     'shift_id' => $shift?->id,
                     'leave_request_id' => $dinasLuar?->id,
+                    'schedule_start_time' => $effectiveStart?->format('H:i:s'),
+                    'schedule_end_time' => $effectiveEnd?->format('H:i:s'),
+                    'grace_period_minutes' => $shift?->grace_period_minutes,
+                    'auto_close_hours' => $shift?->auto_close_hours,
+                    'office_lat' => $office->latitude,
+                    'office_lng' => $office->longitude,
+                    'office_radius_m' => $office->radius_m,
                     'source' => AttendanceSource::APP,
                     'work_date' => $workDate,
                     'attempt_no' => $attemptNo,
@@ -398,26 +439,36 @@ class OfficeAttendanceController extends Controller
 
         $shift = $log->shift;
         $dinasLuar = $log->leaveRequest;
-        $schedule = $this->scheduleResolver->resolveOrCreateSchedule($user, $workDate);
-        $isHoliday = $this->scheduleResolver->isHoliday($workDate, $lockedLocation->id);
-        $isDayOff = $isHoliday || ($schedule !== null && $schedule->is_day_off) || $shift === null;
+        $isDayOff = ! $this->balanceService->isEffectiveWorkDay($user, $workDate) || $shift === null;
+        $officeLat = $log->office_lat !== null ? (float) $log->office_lat : (float) $lockedLocation->latitude;
+        $officeLng = $log->office_lng !== null ? (float) $log->office_lng : (float) $lockedLocation->longitude;
+        $officeRadius = $log->office_radius_m ?? $lockedLocation->radius_m;
 
-        $effectiveEnd = $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
+        $effectiveEnd = $log->schedule_end_time !== null
+            ? CarbonImmutable::parse("{$workDate} {$log->schedule_end_time}", $timezone)
+            : $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
         $lat = (float) $validated['lat'];
         $lng = (float) $validated['lng'];
         $accuracyM = (float) $validated['accuracy_m'];
-        $distanceM = $this->geo->haversineMeters($lat, $lng, (float) $lockedLocation->latitude, (float) $lockedLocation->longitude);
+        $distanceM = $this->geo->haversineMeters($lat, $lng, $officeLat, $officeLng);
 
         $geoEval = $this->geo->evaluate(
             distanceM: $distanceM,
             accuracyM: $accuracyM,
-            radiusM: $lockedLocation->radius_m,
+            radiusM: $officeRadius,
             isEntryPhase: false,
             bypassRadius: $dinasLuar !== null,
         );
 
         $earlyLeaveMinutes = 0;
-        $flags = $geoEval['flags'];
+        $flags = [...($log->clock_out_anomaly_flags ?? []), ...$geoEval['flags']];
+
+        if ($isDayOff) {
+            $flags[] = 'OFF_DAY_ATTENDANCE';
+        }
+        if ($dinasLuar !== null) {
+            $flags[] = 'OFFSITE_DUTY';
+        }
 
         if (! $isDayOff && $effectiveEnd !== null && $nowLocal->lessThan($effectiveEnd)) {
             $earlyLeaveMinutes = (int) $nowLocal->diffInMinutes($effectiveEnd);
@@ -449,7 +500,7 @@ class OfficeAttendanceController extends Controller
             accuracyM: $accuracyM,
             nowUtc: $nowUtc,
             deviceId: $deviceId,
-            isInsideRadius: $distanceM <= $lockedLocation->radius_m,
+            isInsideRadius: $distanceM <= $officeRadius,
             isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
         );
 

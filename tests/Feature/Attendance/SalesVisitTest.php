@@ -2,6 +2,7 @@
 
 use App\Enums\LocationStatus;
 use App\Enums\LocationType;
+use App\Enums\ScheduleSource;
 use App\Enums\UserRole;
 use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
@@ -10,6 +11,7 @@ use App\Models\ActivityCategory;
 use App\Models\Location;
 use App\Models\SalesVisit;
 use App\Models\User;
+use App\Models\UserShiftSchedule;
 use App\Services\TokenGuardService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
@@ -234,6 +236,58 @@ test('sales visit-in with selfie, single in-progress lock, cancel <= 5m, and pho
     expect($stale->visit_status)->toBe(VisitStatus::AUTO_CLOSED)
         ->and($stale->verification_status)->toBe(VerificationStatus::PENDING_REVIEW)
         ->and($stale->anomaly_flags)->toContain('MISSED_VISIT_OUT');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales visit on a manual day off adds OFF_DAY_ATTENDANCE', function () {
+    Storage::fake('local');
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create([
+        'type' => LocationType::OFFICE,
+        'timezone' => 'Asia/Jakarta',
+        'work_days' => [1, 2, 3, 4, 5],
+    ]);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $outlet = Location::factory()->create([
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+    ]);
+
+    UserShiftSchedule::query()->create([
+        'user_id' => $sales->id,
+        'work_date' => '2026-11-23',
+        'shift_id' => null,
+        'is_day_off' => true,
+        'source' => ScheduleSource::MANUAL_OVERRIDE,
+        'created_by' => $sales->id,
+    ]);
+
+    $tokens = app(TokenGuardService::class);
+    $gps = $tokens->issueGpsSessionToken($sales->id);
+    $cam = $tokens->issueCameraToken($sales->id);
+
+    $res = $this->actingAs($sales)
+        ->postJson('/attendance/sales/visit-in', [
+            'idempotency_key' => (string) Str::uuid(),
+            'outlet_location_id' => $outlet->id,
+            'lat' => -6.2000000,
+            'lng' => 106.8166667,
+            'accuracy_m' => 10,
+            'gps_session_token' => $gps['token'],
+            'camera_token' => $cam['token'],
+            'photo' => UploadedFile::fake()->image('visit.jpg', 320, 240),
+        ])->assertCreated()
+        ->assertJsonPath('visit.verification_status', VerificationStatus::PENDING_REVIEW->value);
+
+    expect($res->json('visit.anomaly_flags'))->toContain('OFF_DAY_ATTENDANCE');
 
     CarbonImmutable::setTestNow();
 });

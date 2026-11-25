@@ -15,6 +15,13 @@ use Illuminate\Support\Carbon;
  * @property int $location_id
  * @property int|null $shift_id
  * @property int|null $leave_request_id
+ * @property string|null $schedule_start_time
+ * @property string|null $schedule_end_time
+ * @property int|null $grace_period_minutes
+ * @property int|null $auto_close_hours
+ * @property string|null $office_lat
+ * @property string|null $office_lng
+ * @property int|null $office_radius_m
  * @property AttendanceSource $source
  * @property Carbon $work_date
  * @property int $attempt_no
@@ -48,6 +55,13 @@ use Illuminate\Support\Carbon;
     'location_id',
     'shift_id',
     'leave_request_id',
+    'schedule_start_time',
+    'schedule_end_time',
+    'grace_period_minutes',
+    'auto_close_hours',
+    'office_lat',
+    'office_lng',
+    'office_radius_m',
     'source',
     'work_date',
     'attempt_no',
@@ -99,6 +113,11 @@ class AttendanceLog extends Model
             'work_date' => 'date',
             'attempt_no' => 'integer',
             'is_active_attempt' => 'integer',
+            'grace_period_minutes' => 'integer',
+            'auto_close_hours' => 'integer',
+            'office_lat' => 'decimal:7',
+            'office_lng' => 'decimal:7',
+            'office_radius_m' => 'integer',
             'clock_in_at' => 'datetime',
             'clock_in_lat' => 'decimal:7',
             'clock_in_lng' => 'decimal:7',

@@ -298,6 +298,7 @@ test('holiday create update and delete trigger recalculateLeaveRequestDays and t
     expect((float) $junior->leaveBalances()->where('year', 2026)->value('collective_leave_deduction'))->toBe(0.0);
     expect((float) $junior->leaveBalances()->where('year', 2026)->value('base_quota'))->toBe(0.0);
     expect(AuditLog::query()->where('entity', 'leave_balances')->where('action', AuditAction::UPDATE)->exists())->toBeTrue();
+    expect(AuditLog::query()->where('entity', 'leave_requests')->where('action', AuditAction::UPDATE)->exists())->toBeTrue();
 
     // Move holiday from 2026-03-24 to 2026-03-25 and switch type to LOCAL (Bali only)
     // Senior (Jakarta) gets 2026-03-24 restored -> total_days 3, pending_days 3, collective_leave_deduction 0
@@ -364,6 +365,35 @@ test('manual balance adjustment and atomic CSV import preserve used/pending days
     $empBal = $emp->leaveBalances()->where('year', 2026)->firstOrFail();
     expect((float) $empBal->used_days)->toBe(2.0)->and((float) $empBal->pending_days)->toBe(1.0);
 
+    // Non-half-day adjustment rejected on both endpoints
+    $this->actingAs($hr)->postJson("/admin/users/{$emp->id}/leave-balance", [
+        'year' => 2026,
+        'adjustment_days' => 1.2,
+        'reason' => 'Bukan kelipatan setengah hari',
+    ])->assertUnprocessable();
+
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'year' => 2026,
+        'rows' => [['nik' => 'EMP888', 'adjustment_days' => 0.25]],
+    ])->assertUnprocessable();
+
+    // Tab-prefixed formula in NIK rejected
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'year' => 2026,
+        'rows' => [['nik' => "\t=CMD()", 'adjustment_days' => 1.0]],
+    ])->assertUnprocessable();
+
+    // Duplicate NIK rejected atomically
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'year' => 2026,
+        'rows' => [
+            ['nik' => 'EMP888', 'adjustment_days' => 0.5],
+            ['nik' => 'emp888', 'adjustment_days' => 1.0],
+        ],
+    ])->assertUnprocessable();
+
+    expect((float) $empBal->fresh()->adjustment_days)->toBe(3.5);
+
     // Atomic all-or-nothing: second row unknown NIK rolls back EMP888 change
     $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
         'year' => 2026,
@@ -391,6 +421,17 @@ test('manual balance adjustment and atomic CSV import preserve used/pending days
         ->and((float) $empBal->pending_days)->toBe(1.0)
         ->and((float) $newBal->base_quota)->toBe(0.0)
         ->and((float) $newBal->adjustment_days)->toBe(1.0);
+
+    // Scheduler owns base_quota/prorated_deduction: CSV values are ignored, adjustment_days remains the only lever
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'year' => 2026,
+        'rows' => [['nik' => 'EMP889', 'adjustment_days' => 1.5, 'base_quota' => 12, 'prorated_deduction' => 6]],
+    ])->assertOk();
+
+    $newBal->refresh();
+    expect((float) $newBal->base_quota)->toBe(0.0)
+        ->and((float) $newBal->prorated_deduction)->toBe(0.0)
+        ->and((float) $newBal->adjustment_days)->toBe(1.5);
 
     CarbonImmutable::setTestNow();
 });

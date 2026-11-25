@@ -38,6 +38,7 @@
         status: string;
         attachment_url?: string | null;
         reject_reason?: string | null;
+        hr_conflict_warning?: boolean;
         user: {
             id: number;
             nik: string;
@@ -423,6 +424,11 @@
                                                         5,
                                                     )})
                                                 {/if}
+                                            </p>
+                                        {/if}
+                                        {#if req.hr_conflict_warning}
+                                            <p class="mt-1 max-w-56 rounded bg-amber-50 px-1.5 py-1 text-[11px] leading-snug text-amber-800">
+                                                HR Admin yang masuk kerja kurang dari 2 orang pada tanggal ini.
                                             </p>
                                         {/if}
                                     </td>

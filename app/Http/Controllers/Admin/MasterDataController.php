@@ -10,6 +10,7 @@ use App\Enums\LocationStatus;
 use App\Enums\LocationType;
 use App\Enums\ScheduleSource;
 use App\Enums\UserRole;
+use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
 use App\Http\Controllers\Controller;
 use App\Models\ActivityCategory;
@@ -144,8 +145,15 @@ class MasterDataController extends Controller
         return response()->json(['mapping' => $talentaMapping->fresh('updater:id,nik,name')]);
     }
 
-    public function auditLogsIndex(): Response
+    public function auditLogsIndex(Request $request): Response
     {
+        /** @var User $user */
+        $user = $request->user();
+
+        if ($user->role !== UserRole::HR_ADMIN && ! $user->can_view_audit_logs) {
+            abort(403, 'Anda tidak berwenang melihat riwayat audit.');
+        }
+
         return Inertia::render('admin/AuditLogs', [
             'logs' => AuditLog::query()->with('actor:id,nik,name')->latest('id')->limit(200)->get(),
         ]);
@@ -325,6 +333,12 @@ class MasterDataController extends Controller
             $joinDateChanged = isset($attributes['join_date'])
                 && $attributes['join_date'] !== $user->join_date->toDateString();
 
+            if (array_key_exists('is_active', $attributes)) {
+                $attributes['deactivated_at'] = $newActive
+                    ? null
+                    : ($user->deactivated_at ?? now('UTC'));
+            }
+
             $user->update($attributes);
 
             if ($request->hasFile('reference_photo')) {
@@ -431,7 +445,7 @@ class MasterDataController extends Controller
 
         $validated = $request->validate([
             'year' => ['required', 'integer', 'min:2024', 'max:2100'],
-            'adjustment_days' => ['required', 'numeric', 'between:-30,30'],
+            'adjustment_days' => ['required', 'numeric', 'between:-30,30', 'multiple_of:0.5'],
             'reason' => ['required', 'string', 'min:3', 'max:500'],
         ]);
 
@@ -466,9 +480,7 @@ class MasterDataController extends Controller
             'year' => ['required', 'integer', 'min:2024', 'max:2100'],
             'rows' => ['required', 'array', 'min:1'],
             'rows.*.nik' => ['required', 'string'],
-            'rows.*.adjustment_days' => ['required', 'numeric', 'between:-30,30'],
-            'rows.*.base_quota' => ['nullable', 'numeric', 'between:0,30'],
-            'rows.*.prorated_deduction' => ['nullable', 'numeric', 'between:0,12'],
+            'rows.*.adjustment_days' => ['required', 'numeric', 'between:-30,30', 'multiple_of:0.5'],
         ]);
 
         $year = (int) $validated['year'];
@@ -477,6 +489,8 @@ class MasterDataController extends Controller
         $updated = 0;
 
         DB::transaction(function () use ($validated, $actor, $year, $asOf, &$updated): void {
+            $seenNiks = [];
+
             foreach ($validated['rows'] as $idx => $row) {
                 $nikRaw = (string) $row['nik'];
                 if ($this->csvSanitizer->hasFormulaPrefix($nikRaw)) {
@@ -486,6 +500,13 @@ class MasterDataController extends Controller
                 }
 
                 $nik = strtoupper(trim($nikRaw));
+                if (isset($seenNiks[$nik])) {
+                    throw ValidationException::withMessages([
+                        'rows' => ['NIK duplikat dalam satu file pada baris '.($idx + 1).": {$nik}"],
+                    ]);
+                }
+                $seenNiks[$nik] = true;
+
                 $target = User::query()->where('nik', $nik)->first();
                 if ($target === null) {
                     throw ValidationException::withMessages([
@@ -498,25 +519,17 @@ class MasterDataController extends Controller
                 }
 
                 $bal = $this->balanceService->ensureBalanceForYear($target, $year, $asOf);
-                $old = $bal->only(['adjustment_days', 'base_quota', 'prorated_deduction']);
-                $updates = ['adjustment_days' => (float) $row['adjustment_days']];
+                $oldAdjustment = (float) $bal->adjustment_days;
 
-                if (array_key_exists('base_quota', $row) && $row['base_quota'] !== null) {
-                    $updates['base_quota'] = (float) $row['base_quota'];
-                }
-                if (array_key_exists('prorated_deduction', $row) && $row['prorated_deduction'] !== null) {
-                    $updates['prorated_deduction'] = (float) $row['prorated_deduction'];
-                }
-
-                $bal->update($updates);
+                $bal->update(['adjustment_days' => (float) $row['adjustment_days']]);
 
                 $this->audit->log(
                     actorId: $actor->id,
                     entity: 'leave_balances',
                     recordId: $bal->id,
                     action: AuditAction::BULK_IMPORT,
-                    oldValues: $old,
-                    newValues: $bal->only(['adjustment_days', 'base_quota', 'prorated_deduction']),
+                    oldValues: ['adjustment_days' => $oldAdjustment],
+                    newValues: ['adjustment_days' => (float) $bal->adjustment_days],
                     reason: 'Bulk import saldo awal cuti Talenta',
                 );
                 $updated++;
@@ -539,11 +552,17 @@ class MasterDataController extends Controller
             'work_date' => ['required', 'date'],
             'shift_id' => ['nullable', 'integer', 'exists:shifts,id'],
             'is_day_off' => ['required', 'boolean'],
+            'replacement_for_date' => ['nullable', 'date'],
+            'notes' => ['nullable', 'string', 'max:255'],
         ]);
 
         $timezone = $user->officeLocation->timezone ?? 'Asia/Jakarta';
         $todayLocal = CarbonImmutable::now('UTC')->setTimezone($timezone)->toDateString();
         $targetDate = (string) $validated['work_date'];
+        $replacementDate = isset($validated['replacement_for_date'])
+            ? (string) $validated['replacement_for_date']
+            : null;
+        $notes = trim((string) ($validated['notes'] ?? ''));
 
         if ($targetDate < $todayLocal) {
             throw ValidationException::withMessages([
@@ -565,17 +584,85 @@ class MasterDataController extends Controller
             }
         }
 
-        $schedule = DB::transaction(function () use ($user, $actor, $targetDate, $validated): UserShiftSchedule {
+        $schedule = DB::transaction(function () use ($user, $actor, $targetDate, $validated, $todayLocal, $replacementDate, $notes): UserShiftSchedule {
             $existing = UserShiftSchedule::query()
                 ->where('user_id', $user->id)
                 ->whereDate('work_date', $targetDate)
                 ->first();
 
-            $old = $existing?->only(['shift_id', 'is_day_off', 'source']);
+            if ($replacementDate !== null) {
+                if (! (bool) $validated['is_day_off']) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ['Ganti hari wajib menetapkan tanggal pengganti sebagai hari libur.'],
+                    ]);
+                }
+
+                if (! in_array($user->role, [UserRole::EMPLOYEE_OFFICE, UserRole::EMPLOYEE_SALES], true)) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ['Ganti hari hanya berlaku untuk Marketing dan Sales.'],
+                    ]);
+                }
+
+                if ($replacementDate >= $targetDate || $replacementDate > $todayLocal) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ['Tanggal asal ganti hari harus sebelum tanggal pengganti dan tidak melewati hari ini.'],
+                    ]);
+                }
+
+                if (! $this->balanceService->isEffectiveWorkDay($user, $targetDate)) {
+                    throw ValidationException::withMessages([
+                        'work_date' => ['Tanggal pengganti harus hari kerja efektif saat ini.'],
+                    ]);
+                }
+
+                if ($notes === '') {
+                    throw ValidationException::withMessages([
+                        'notes' => ['Catatan/alasan ganti hari wajib diisi.'],
+                    ]);
+                }
+
+                $originUsed = UserShiftSchedule::query()
+                    ->where('user_id', $user->id)
+                    ->whereDate('replacement_for_date', $replacementDate)
+                    ->when($existing !== null, fn ($query) => $query->where('id', '!=', $existing->id))
+                    ->exists();
+
+                if ($originUsed) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ['Tanggal asal tersebut sudah pernah ditukar menjadi ganti hari.'],
+                    ]);
+                }
+
+                $originValid = $user->role === UserRole::EMPLOYEE_SALES
+                    ? SalesVisit::query()
+                        ->where('user_id', $user->id)
+                        ->whereDate('visit_date', $replacementDate)
+                        ->where('visit_status', '!=', VisitStatus::CANCELLED)
+                        ->whereIn('verification_status', [VerificationStatus::AUTO_APPROVED->value, VerificationStatus::APPROVED->value])
+                        ->get()
+                        ->contains(fn (SalesVisit $visit): bool => in_array('OFF_DAY_ATTENDANCE', $visit->anomaly_flags ?? [], true))
+                    : AttendanceLog::query()
+                        ->where('user_id', $user->id)
+                        ->whereDate('work_date', $replacementDate)
+                        ->whereIn('clock_in_status', [VerificationStatus::AUTO_APPROVED->value, VerificationStatus::APPROVED->value])
+                        ->where('is_active_attempt', 1)
+                        ->get()
+                        ->contains(fn (AttendanceLog $log): bool => in_array('OFF_DAY_ATTENDANCE', $log->clock_in_anomaly_flags ?? [], true));
+
+                if (! $originValid) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ['Tanggal asal tidak memiliki kehadiran libur yang sah dan disetujui.'],
+                    ]);
+                }
+            }
+
+            $old = $existing?->only(['shift_id', 'is_day_off', 'source', 'notes', 'replacement_for_date']);
             $attributes = [
                 'shift_id' => (bool) $validated['is_day_off'] ? null : ($validated['shift_id'] ?? null),
                 'is_day_off' => (bool) $validated['is_day_off'],
                 'source' => ScheduleSource::MANUAL_OVERRIDE,
+                'notes' => $notes !== '' ? $notes : null,
+                'replacement_for_date' => $replacementDate,
                 'created_by' => $actor->id,
             ];
 
@@ -597,7 +684,7 @@ class MasterDataController extends Controller
                 recordId: $saved->id,
                 action: $existing !== null ? AuditAction::UPDATE : AuditAction::CREATE,
                 oldValues: $old,
-                newValues: $saved->only(['shift_id', 'is_day_off', 'source']),
+                newValues: $saved->only(['shift_id', 'is_day_off', 'source', 'notes', 'replacement_for_date']),
             );
 
             return $saved;
@@ -789,6 +876,17 @@ class MasterDataController extends Controller
         $recalculatedIds = [];
         if ($futureDates !== []) {
             $recalculatedIds = $this->balanceService->recalculateLeaveRequestDays(min($futureDates));
+
+            if ($recalculatedIds !== []) {
+                $this->audit->log(
+                    actorId: $actor->id,
+                    entity: 'leave_requests',
+                    recordId: 0,
+                    action: AuditAction::UPDATE,
+                    newValues: ['recalculated_leave_request_ids' => $recalculatedIds],
+                    reason: 'Rekalkulasi otomatis akibat perubahan hari libur',
+                );
+            }
         }
 
         foreach (array_values(array_unique($collectiveYears)) as $year) {

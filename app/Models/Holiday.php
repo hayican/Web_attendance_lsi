@@ -14,6 +14,7 @@ use Illuminate\Support\Carbon;
  * @property int|null $location_id
  * @property string $description
  * @property HolidayType $holiday_type
+ * @property-read Location|null $location
  */
 #[Fillable([
     'holiday_date',

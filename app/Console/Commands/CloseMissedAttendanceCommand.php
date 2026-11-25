@@ -6,6 +6,7 @@ use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
 use App\Models\AttendanceLog;
 use App\Models\SalesVisit;
+use App\Models\Shift;
 use App\Services\ScheduleResolverService;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
@@ -34,8 +35,14 @@ class CloseMissedAttendanceCommand extends Command
             $workDate = $log->work_date->toDateString();
             $nowLocal = $nowUtc->setTimezone($timezone);
 
-            $effectiveEnd = $scheduleResolver->effectiveEndTime($workDate, $timezone, $log->shift, $log->leaveRequest);
-            $autoCloseHours = $log->shift !== null ? $log->shift->auto_close_hours : 5;
+            /** @var Shift|null $shift */
+            $shift = $log->shift;
+
+            $effectiveEnd = $log->schedule_end_time !== null
+                ? CarbonImmutable::parse("{$workDate} {$log->schedule_end_time}", $timezone)
+                : $scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $log->leaveRequest);
+            // @phpstan-ignore nullsafe.neverNull (Larastan treats the nullable shift relation as non-null)
+            $autoCloseHours = $log->auto_close_hours ?? $log->shift?->auto_close_hours ?? 5;
 
             $deadline = $effectiveEnd !== null
                 ? $effectiveEnd->addHours($autoCloseHours)

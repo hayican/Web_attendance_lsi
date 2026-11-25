@@ -130,6 +130,12 @@ class LeaveController extends Controller
                     'start_date' => ['Cuti Tahunan tidak dapat diajukan mundur (backdate).'],
                 ]);
             }
+
+            if (! $this->isAtLeastThreeEffectiveWorkDaysAhead($user, $todayLocal, $startDate)) {
+                throw ValidationException::withMessages([
+                    'start_date' => ['Cuti Tahunan wajib diajukan minimal H-3 hari kerja efektif sebelum tanggal mulai.'],
+                ]);
+            }
         }
 
         if (in_array($type, [LeaveType::IZIN, LeaveType::SAKIT], true)) {
@@ -233,6 +239,23 @@ class LeaveController extends Controller
             }
 
             $val = $this->balanceService->isEffectiveWorkDay($user, $dateStr) ? 1.0 : 0.0;
+
+            if ($type === LeaveType::DINAS_LUAR && $val > 0.0) {
+                $scheduledStart = substr((string) $validated['scheduled_start_time'], 0, 5);
+                $daySchedule = UserShiftSchedule::query()
+                    ->with('shift:id,end_time')
+                    ->where('user_id', $user->id)
+                    ->whereDate('work_date', $dateStr)
+                    ->first();
+                $shiftEnd = $daySchedule?->shift?->end_time;
+
+                if ($shiftEnd !== null && $scheduledStart > substr($shiftEnd, 0, 5)) {
+                    throw ValidationException::withMessages([
+                        'scheduled_start_time' => ["Jam mulai Dinas Luar melewati jam pulang shift pada {$dateStr}."],
+                    ]);
+                }
+            }
+
             $dayRows[] = [
                 'date' => $dateStr,
                 'year' => $cursor->year,
@@ -339,7 +362,8 @@ class LeaveController extends Controller
             $otherHrOnLeave = LeaveRequestDay::query()
                 ->where('user_id', '!=', $user->id)
                 ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
-                ->whereBetween('leave_date', [$startDate->toDateString(), $endDate->toDateString()])
+                ->whereDate('leave_date', '>=', $startDate->toDateString())
+                ->whereDate('leave_date', '<=', $endDate->toDateString())
                 ->whereHas('user', fn ($q) => $q->where('role', UserRole::HR_ADMIN)->where('is_active', true))
                 ->distinct('user_id')
                 ->count('user_id');
@@ -417,6 +441,27 @@ class LeaveController extends Controller
         return $cursor;
     }
 
+    private function isAtLeastThreeEffectiveWorkDaysAhead(
+        User $user,
+        CarbonImmutable $todayLocal,
+        CarbonImmutable $startDate,
+    ): bool {
+        $cursor = $startDate->subDay();
+        $counted = 0;
+
+        for ($i = 0; $i < 30 && $counted < 3; $i++) {
+            if ($this->balanceService->isEffectiveWorkDay($user, $cursor->toDateString())) {
+                $counted++;
+                if ($counted === 3) {
+                    break;
+                }
+            }
+            $cursor = $cursor->subDay();
+        }
+
+        return $counted >= 3 && $todayLocal->lessThanOrEqualTo($cursor);
+    }
+
     /**
      * @param  list<array{date: string, year: int, month: string, value: float}>  $dayRows
      */
@@ -436,7 +481,8 @@ class LeaveController extends Controller
 
             $existingInMonth = (float) LeaveRequestDay::query()
                 ->where('user_id', $userId)
-                ->whereBetween('leave_date', [$monthStart, $monthEnd])
+                ->whereDate('leave_date', '>=', $monthStart)
+                ->whereDate('leave_date', '<=', $monthEnd)
                 ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
                 ->whereHas('leaveRequest', fn ($q) => $q->where('type', LeaveType::CUTI))
                 ->sum('day_value');

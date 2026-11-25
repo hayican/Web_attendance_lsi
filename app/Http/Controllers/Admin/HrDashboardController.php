@@ -5,24 +5,34 @@ namespace App\Http\Controllers\Admin;
 use App\Enums\AttendanceSource;
 use App\Enums\AuditAction;
 use App\Enums\LeaveDayStatus;
+use App\Enums\LeaveStatus;
 use App\Enums\LeaveType;
+use App\Enums\LocationStatus;
+use App\Enums\ScheduleSource;
 use App\Enums\UserRole;
 use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
 use App\Http\Controllers\Controller;
 use App\Mail\AttendanceRejectedMail;
+use App\Models\ActivityCategory;
 use App\Models\AttendanceLog;
+use App\Models\Holiday;
+use App\Models\LeaveRequest;
 use App\Models\LeaveRequestDay;
+use App\Models\Location;
 use App\Models\SalesVisit;
 use App\Models\Shift;
 use App\Models\User;
+use App\Models\UserShiftSchedule;
 use App\Services\AttendanceHelperService;
 use App\Services\AuditLogger;
 use App\Services\ImageEvidenceService;
+use App\Services\LeaveBalanceService;
 use App\Services\ScheduleResolverService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Validation\ValidationException;
@@ -40,6 +50,8 @@ class HrDashboardController extends Controller
         'CONSTANT_ACCURACY',
         'STALE_TIMESTAMP',
         'UNVERIFIED_OUTLET',
+        'OFFSITE_DUTY',
+        'OFF_DAY_ATTENDANCE',
     ];
 
     public function __construct(
@@ -47,6 +59,7 @@ class HrDashboardController extends Controller
         private readonly ImageEvidenceService $imageEvidence,
         private readonly ScheduleResolverService $scheduleResolver,
         private readonly AttendanceHelperService $helper,
+        private readonly LeaveBalanceService $balanceService,
     ) {}
 
     public function index(Request $request): Response
@@ -63,31 +76,72 @@ class HrDashboardController extends Controller
             ->orderBy('name')
             ->get();
 
-        $dailyRecap = $users->map(function (User $u) use ($selectedDate): array {
+        $userIds = $users->pluck('id');
+        $locationIds = $users->pluck('office_location_id')->unique()->values();
+
+        $holidays = Holiday::query()
+            ->with('location:id,name')
+            ->whereDate('holiday_date', $selectedDate)
+            ->where(fn ($query) => $query->whereNull('location_id')->orWhereIn('location_id', $locationIds))
+            ->get(['id', 'location_id', 'holiday_type', 'description']);
+        $globalHoliday = $holidays->contains(fn (Holiday $holiday): bool => $holiday->location_id === null);
+        $holidayLocationIds = $holidays->whereNotNull('location_id')->pluck('location_id')->all();
+
+        $schedulesByUser = UserShiftSchedule::query()
+            ->whereIn('user_id', $userIds)
+            ->whereDate('work_date', $selectedDate)
+            ->get()
+            ->keyBy('user_id');
+
+        $leaveDaysByUser = LeaveRequestDay::query()
+            ->with('leaveRequest:id,type')
+            ->whereIn('user_id', $userIds)
+            ->whereDate('leave_date', $selectedDate)
+            ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
+            ->get()
+            ->groupBy('user_id');
+
+        $logsByUser = AttendanceLog::query()
+            ->with('shift:id,code,end_time')
+            ->whereIn('user_id', $userIds)
+            ->whereDate('work_date', $selectedDate)
+            ->get()
+            ->groupBy('user_id');
+
+        $visitsByUser = SalesVisit::query()
+            ->with(['outletLocation:id,name,code', 'activityCategory:id,name'])
+            ->whereIn('user_id', $userIds)
+            ->whereDate('visit_date', $selectedDate)
+            ->orderBy('visit_in_at')
+            ->get()
+            ->groupBy('user_id');
+
+        $dailyRecap = $users->map(function (User $u) use ($selectedDate, $schedulesByUser, $leaveDaysByUser, $logsByUser, $visitsByUser, $globalHoliday, $holidayLocationIds): array {
             $tz = $u->officeLocation->timezone;
             $nowLocal = CarbonImmutable::now('UTC')->setTimezone($tz);
             $todayLocal = $nowLocal->toDateString();
-
-            $approvedLeave = LeaveRequestDay::query()
-                ->with('leaveRequest:id,type')
-                ->where('user_id', $u->id)
-                ->whereDate('leave_date', $selectedDate)
-                ->where('status', LeaveDayStatus::APPROVED)
-                ->first();
-
-            $pendingLeave = LeaveRequestDay::query()
-                ->with('leaveRequest:id,type')
-                ->where('user_id', $u->id)
-                ->whereDate('leave_date', $selectedDate)
-                ->where('status', LeaveDayStatus::PENDING)
-                ->first();
+            $schedule = $schedulesByUser->get($u->id);
+            $hasHoliday = $globalHoliday || in_array($u->office_location_id, $holidayLocationIds, true);
+            $isEffectiveWorkDay = $this->balanceService->isEffectiveWorkDayFrom($u, $selectedDate, $hasHoliday, $schedule);
+            $isGantiHari = $schedule !== null
+                && $schedule->source === ScheduleSource::MANUAL_OVERRIDE
+                && $schedule->is_day_off;
+            $dayOffLabel = $isGantiHari ? 'Libur (Ganti Hari)' : 'Libur';
+            /** @var Collection<int, LeaveRequestDay> $dayLeaves */
+            $dayLeaves = $leaveDaysByUser->get($u->id, collect());
+            $approvedLeave = $dayLeaves->first(fn (LeaveRequestDay $day): bool => $day->status === LeaveDayStatus::APPROVED);
+            $pendingLeave = $dayLeaves->first(fn (LeaveRequestDay $day): bool => $day->status === LeaveDayStatus::PENDING);
+            $dayLogs = $logsByUser->get($u->id, collect());
+            $activeLog = $dayLogs->firstWhere('is_active_attempt', 1);
+            $lastRejectedLog = $activeLog === null
+                ? $dayLogs
+                    ->filter(fn (AttendanceLog $log): bool => $log->clock_in_status === VerificationStatus::REJECTED)
+                    ->sortByDesc('attempt_no')
+                    ->first()
+                : null;
 
             if ($u->role === UserRole::EMPLOYEE_SALES) {
-                $visits = SalesVisit::query()
-                    ->where('user_id', $u->id)
-                    ->whereDate('visit_date', $selectedDate)
-                    ->orderBy('visit_in_at')
-                    ->get();
+                $visits = $visitsByUser->get($u->id, collect());
 
                 $validVisits = $visits->filter(
                     fn (SalesVisit $v): bool => $v->visit_status !== VisitStatus::CANCELLED
@@ -107,6 +161,8 @@ class HrDashboardController extends Controller
                     };
                 } elseif ($validVisits->isNotEmpty()) {
                     $status = 'Hadir';
+                } elseif (! $isEffectiveWorkDay) {
+                    $status = $dayOffLabel;
                 } elseif ($selectedDate < $todayLocal) {
                     $status = $rejectedVisits->isNotEmpty() ? 'Alpa (Ditolak HR)' : 'Alpa';
                 } elseif ($pendingLeave !== null && $pendingLeave->leaveRequest !== null) {
@@ -130,24 +186,10 @@ class HrDashboardController extends Controller
                     'attendance_status' => $status,
                     'verification_status' => $validVisits->first()?->verification_status->value ?? '-',
                     'source' => $validVisits->first()?->source->value ?? '-',
+                    'rejected_log_id' => null,
+                    'rejected_phase' => null,
                 ];
             }
-
-            $activeLog = AttendanceLog::query()
-                ->with(['shift:id,code,end_time'])
-                ->where('user_id', $u->id)
-                ->whereDate('work_date', $selectedDate)
-                ->where('is_active_attempt', 1)
-                ->first();
-
-            $lastRejectedLog = $activeLog === null
-                ? AttendanceLog::query()
-                    ->where('user_id', $u->id)
-                    ->whereDate('work_date', $selectedDate)
-                    ->where('clock_in_status', VerificationStatus::REJECTED)
-                    ->latest('attempt_no')
-                    ->first()
-                : null;
 
             $status = 'Belum Absen';
             if ($approvedLeave !== null && $approvedLeave->leaveRequest !== null && $approvedLeave->leaveRequest->type !== LeaveType::DINAS_LUAR) {
@@ -160,10 +202,22 @@ class HrDashboardController extends Controller
                 $status = $activeLog->leave_request_id !== null
                     ? 'Dinas Luar'
                     : ($activeLog->late_minutes > 0 ? 'Terlambat' : 'Hadir');
+            } elseif (! $isEffectiveWorkDay) {
+                $status = $dayOffLabel;
             } elseif ($selectedDate < $todayLocal) {
                 $status = $lastRejectedLog !== null ? 'Alpa (Ditolak HR)' : 'Alpa';
             } elseif ($pendingLeave !== null && $pendingLeave->leaveRequest !== null) {
                 $status = 'Belum Absen (Pending '.$pendingLeave->leaveRequest->type->value.')';
+            }
+
+            $rejectedLogId = null;
+            $rejectedPhase = null;
+            if ($lastRejectedLog !== null) {
+                $rejectedLogId = $lastRejectedLog->id;
+                $rejectedPhase = 'clock_in';
+            } elseif ($activeLog !== null && $activeLog->clock_out_status === VerificationStatus::REJECTED) {
+                $rejectedLogId = $activeLog->id;
+                $rejectedPhase = 'clock_out';
             }
 
             return [
@@ -182,11 +236,13 @@ class HrDashboardController extends Controller
                 'attendance_status' => $status,
                 'verification_status' => $activeLog?->clock_in_status->value ?? ($lastRejectedLog?->clock_in_status->value ?? '-'),
                 'source' => $activeLog?->source->value ?? '-',
+                'rejected_log_id' => $rejectedLogId,
+                'rejected_phase' => $rejectedPhase,
             ];
         })->values();
 
         $pendingAttendance = AttendanceLog::query()
-            ->with(['user:id,nik,name,reference_photo_url', 'location:id,name,latitude,longitude,radius_m,timezone', 'shift:id,code,end_time'])
+            ->with(['user:id,nik,name,reference_photo_url', 'location:id,name,latitude,longitude,radius_m,timezone', 'shift:id,code,end_time', 'leaveRequest:id,status'])
             ->where(function ($q): void {
                 $q->where('clock_in_status', VerificationStatus::PENDING_REVIEW)
                     ->orWhere('clock_out_status', VerificationStatus::PENDING_REVIEW);
@@ -220,6 +276,8 @@ class HrDashboardController extends Controller
                     'photo_url' => $photoPath !== null ? $this->imageEvidence->signedUrl($photoPath) : null,
                     'reference_photo_url' => $log->user->reference_photo_url !== null ? $this->imageEvidence->signedUrl($log->user->reference_photo_url) : null,
                     'bulk_eligible' => array_intersect($flags, self::BULK_EXCLUDED_FLAGS) === [],
+                    'review_locked' => $log->leave_request_id !== null
+                        && $log->leaveRequest?->status === LeaveStatus::PENDING,
                 ];
             });
 
@@ -253,13 +311,65 @@ class HrDashboardController extends Controller
                     'photo_url' => $visit->visit_in_photo_url !== null ? $this->imageEvidence->signedUrl($visit->visit_in_photo_url) : null,
                     'reference_photo_url' => $visit->user->reference_photo_url !== null ? $this->imageEvidence->signedUrl($visit->user->reference_photo_url) : null,
                     'bulk_eligible' => array_intersect($flags, self::BULK_EXCLUDED_FLAGS) === [],
+                    'review_locked' => false,
                 ];
             });
 
+        $pendingLeaveCount = LeaveRequest::query()
+            ->where('status', LeaveStatus::PENDING)
+            ->count();
+
+        $pendingNooCount = Location::query()
+            ->where('status', LocationStatus::PENDING_VERIFICATION)
+            ->count();
+
+        $activeHolidays = $holidays->map(function (Holiday $holiday): array {
+            $location = $holiday->getRelation('location');
+
+            return [
+                'id' => $holiday->id,
+                'holiday_type' => $holiday->holiday_type->value,
+                'description' => $holiday->description,
+                'location_name' => $location instanceof Location ? $location->name : 'Semua Cabang',
+            ];
+        })->values();
+
+        $salesVisits = $users
+            ->where('role', UserRole::EMPLOYEE_SALES)
+            ->flatMap(function (User $u) use ($visitsByUser): Collection {
+                $tz = $u->officeLocation->timezone;
+
+                return $visitsByUser->get($u->id, collect())->map(function (SalesVisit $v) use ($tz, $u): array {
+                    $category = $v->getRelation('activityCategory');
+
+                    return [
+                        'id' => $v->id,
+                        'nik' => $u->nik,
+                        'name' => $u->name,
+                        'outlet_name' => $v->outletLocation->name,
+                        'outlet_code' => $v->outletLocation->code ?? 'NOO',
+                        'activity_category' => $category instanceof ActivityCategory ? $category->name : '-',
+                        'visit_in' => $v->visit_in_at?->setTimezone($tz)->format('H:i'),
+                        'visit_out' => $v->visit_out_at?->setTimezone($tz)->format('H:i'),
+                        'duration_minutes' => $v->duration_minutes,
+                        'visit_status' => $v->visit_status->value,
+                        'verification_status' => $v->verification_status->value,
+                        'anomaly_flags' => $v->anomaly_flags ?? [],
+                        'notes' => $v->visit_notes ?? $v->visit_in_notes,
+                    ];
+                });
+            })
+            ->values();
+
         return Inertia::render('admin/Dashboard', [
             'selectedDate' => $selectedDate,
+            'todayDate' => CarbonImmutable::now('Asia/Jakarta')->toDateString(),
             'showSingleHrBanner' => $activeHrCount < 2,
+            'pendingLeaveCount' => $pendingLeaveCount,
+            'pendingNooCount' => $pendingNooCount,
+            'activeHolidays' => $activeHolidays,
             'dailyRecap' => $dailyRecap,
+            'salesVisits' => $salesVisits,
             'pendingQueue' => $pendingAttendance->concat($pendingVisits)->values(),
             'employees' => $users->map(fn (User $u): array => ['id' => $u->id, 'nik' => $u->nik, 'name' => $u->name, 'role' => $u->role->value]),
             'shifts' => Shift::query()->where('is_active', true)->orderBy('code')->get(['id', 'code', 'name']),
@@ -273,6 +383,12 @@ class HrDashboardController extends Controller
 
         if ($attendanceLog->user_id === $actor->id) {
             abort(403, 'Dilarang memverifikasi absensi milik sendiri.');
+        }
+
+        if ($this->linkedDinasIsPending($attendanceLog)) {
+            throw ValidationException::withMessages([
+                'attendance' => ['Tunggu persetujuan Dinas Luar sebelum memverifikasi absensi ini.'],
+            ]);
         }
 
         $validated = $request->validate([
@@ -470,7 +586,7 @@ class HrDashboardController extends Controller
             foreach ($validated['items'] as $item) {
                 if ($item['kind'] === 'attendance') {
                     $log = AttendanceLog::query()->find((int) $item['id']);
-                    if ($log === null || $log->user_id === $actor->id) {
+                    if ($log === null || $log->user_id === $actor->id || $this->linkedDinasIsPending($log)) {
                         continue;
                     }
                     $phase = (string) ($item['phase'] ?? 'clock_in');
@@ -516,6 +632,17 @@ class HrDashboardController extends Controller
         return response()->json(['approved_count' => $approved]);
     }
 
+    private function linkedDinasIsPending(AttendanceLog $log): bool
+    {
+        if ($log->leave_request_id === null) {
+            return false;
+        }
+
+        return LeaveRequest::query()
+            ->whereKey($log->leave_request_id)
+            ->first()?->status === LeaveStatus::PENDING;
+    }
+
     public function storeManualAttendance(Request $request): JsonResponse
     {
         /** @var User $actor */
@@ -552,10 +679,26 @@ class HrDashboardController extends Controller
         /** @var User $targetUser */
         $targetUser = User::query()->with('officeLocation')->findOrFail($targetUserId);
         $tz = $targetUser->officeLocation->timezone;
+        $todayLocal = CarbonImmutable::now('UTC')->setTimezone($tz)->toDateString();
+        $minManualDate = CarbonImmutable::now('UTC')->setTimezone($tz)->subDays(6)->toDateString();
+
+        if ($workDate < $minManualDate || $workDate > $todayLocal) {
+            throw ValidationException::withMessages([
+                'work_date' => ['Input manual HR hanya untuk 7 hari terakhir (termasuk hari ini).'],
+            ]);
+        }
+
         $clockInAt = CarbonImmutable::parse("{$workDate} {$validated['clock_in_time']}:00", $tz)->utc();
         $clockOutAt = ! empty($validated['clock_out_time'])
             ? CarbonImmutable::parse("{$workDate} {$validated['clock_out_time']}:00", $tz)->utc()
             : null;
+
+        if ($clockOutAt !== null && $clockOutAt->lessThanOrEqualTo($clockInAt)) {
+            throw ValidationException::withMessages([
+                'clock_out_time' => ['Jam pulang harus setelah jam masuk.'],
+            ]);
+        }
+
         $reason = trim((string) $validated['reason']);
 
         $log = DB::transaction(function () use ($targetUser, $actor, $workDate, $validated, $clockInAt, $clockOutAt, $reason): AttendanceLog {

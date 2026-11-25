@@ -10,12 +10,18 @@
 </script>
 
 <script lang="ts">
-    import { page, router } from '@inertiajs/svelte';
+    import { Link, page, router } from '@inertiajs/svelte';
     import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+    import Calendar from '@lucide/svelte/icons/calendar';
+    import CalendarCheck from '@lucide/svelte/icons/calendar-check';
     import Check from '@lucide/svelte/icons/check';
     import Clock from '@lucide/svelte/icons/clock';
+    import Database from '@lucide/svelte/icons/database';
     import Download from '@lucide/svelte/icons/download';
+    import FileCheck from '@lucide/svelte/icons/file-check';
+    import History from '@lucide/svelte/icons/history';
     import ShieldAlert from '@lucide/svelte/icons/shield-alert';
+    import Store from '@lucide/svelte/icons/store';
     import Users from '@lucide/svelte/icons/users';
     import X from '@lucide/svelte/icons/x';
     import AppHead from '@/components/AppHead.svelte';
@@ -44,6 +50,7 @@
         photo_url: string | null;
         reference_photo_url: string | null;
         bulk_eligible: boolean;
+        review_locked: boolean;
     };
 
     type RecapRow = {
@@ -60,12 +67,42 @@
         attendance_status: string;
         verification_status: string;
         source: string;
+        rejected_log_id: number | null;
+        rejected_phase: 'clock_in' | 'clock_out' | null;
+    };
+
+    type ActiveHoliday = {
+        id: number;
+        holiday_type: 'NATIONAL' | 'LOCAL' | 'COLLECTIVE_LEAVE';
+        description: string;
+        location_name: string;
+    };
+
+    type SalesVisitRow = {
+        id: number;
+        nik: string;
+        name: string;
+        outlet_name: string;
+        outlet_code: string;
+        activity_category: string;
+        visit_in: string | null;
+        visit_out: string | null;
+        duration_minutes: number | null;
+        visit_status: string;
+        verification_status: string;
+        anomaly_flags: string[];
+        notes: string | null;
     };
 
     type DashboardProps = {
         selectedDate: string;
+        todayDate: string;
         showSingleHrBanner: boolean;
+        pendingLeaveCount: number;
+        pendingNooCount: number;
+        activeHolidays: ActiveHoliday[];
         dailyRecap: RecapRow[];
+        salesVisits: SalesVisitRow[];
         pendingQueue: QueueItem[];
         employees: { id: number; nik: string; name: string; role: string }[];
         shifts: { id: number; code: string; name: string }[];
@@ -73,8 +110,13 @@
 
     let {
         selectedDate,
+        todayDate,
         showSingleHrBanner,
+        pendingLeaveCount,
+        pendingNooCount,
+        activeHolidays,
         dailyRecap,
+        salesVisits,
         pendingQueue,
         employees,
         shifts,
@@ -102,6 +144,9 @@
 
     let exportStart = $state('');
     let exportEnd = $state('');
+    let includeUnverifiedSales = $state(false);
+    let correctTarget = $state<RecapRow | null>(null);
+    let correctReason = $state('');
     let feedback = $state<string | null>(null);
     let busy = $state(false);
 
@@ -344,7 +389,10 @@
     }
 
     async function exportFile(path: string) {
-        const url = `${path}?start_date=${exportStart}&end_date=${exportEnd}`;
+        let url = `${path}?start_date=${exportStart}&end_date=${exportEnd}`;
+        if (path.includes('sales-visits') && includeUnverifiedSales) {
+            url += '&include_unverified=1';
+        }
         if (path.includes('talenta-office')) {
             const check = await fetch(url, { credentials: 'same-origin' });
             if (check.status === 409) {
@@ -355,6 +403,41 @@
             }
         }
         window.location.href = url;
+    }
+
+    async function submitCorrection() {
+        if (!correctTarget || !correctTarget.rejected_log_id || !correctTarget.rejected_phase) return;
+        if (correctReason.trim().length < 3) {
+            feedback = 'Alasan koreksi status minimal 3 karakter.';
+            return;
+        }
+        busy = true;
+        feedback = null;
+        try {
+            const res = await fetch(`/admin/attendance/${correctTarget.rejected_log_id}/correct`, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    'X-XSRF-TOKEN': readXsrfToken(),
+                },
+                body: JSON.stringify({
+                    phase: correctTarget.rejected_phase,
+                    reason: correctReason.trim(),
+                }),
+            });
+            const data = (await res.json()) as { message?: string };
+            if (!res.ok) {
+                feedback = data.message ?? 'Koreksi status gagal.';
+                return;
+            }
+            correctTarget = null;
+            correctReason = '';
+            router.reload();
+        } finally {
+            busy = false;
+        }
     }
 </script>
 
@@ -370,6 +453,24 @@
                 Perhatian: Baru terdapat 1 HR Admin aktif. Segera tambahkan
                 minimal 1 HR Admin kedua agar saling verifikasi tetap berjalan.
             </span>
+        </div>
+    {/if}
+
+    {#if activeHolidays.length > 0}
+        <div class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900 shadow-xs">
+            <div class="flex flex-wrap items-center gap-2">
+                <Calendar class="size-4 shrink-0 text-amber-700" />
+                <span class="font-semibold">Hari Libur / Cuti Bersama ({selectedDate}):</span>
+                {#each activeHolidays as h (h.id)}
+                    <span class="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-medium text-amber-900">
+                        <span class="font-mono text-[10px] uppercase text-amber-700">{h.holiday_type}</span>
+                        {h.description} ({h.location_name})
+                    </span>
+                {/each}
+            </div>
+            <Link href="/admin/master-data" class="text-[11px] font-medium text-[#6F3E1D] underline hover:text-[#583015]">
+                Kelola Hari Libur
+            </Link>
         </div>
     {/if}
 
@@ -419,7 +520,67 @@
                     >
                         Audit
                     </Button>
+                    <label class="flex cursor-pointer items-center gap-1.5 text-[11px] text-stone-100">
+                        <input type="checkbox" bind:checked={includeUnverifiedSales} class="rounded border-white/40" />
+                        <span>Sertakan Sales Pending/Rejected</span>
+                    </label>
                 </div>
+            </div>
+
+            <!-- Quick Links & Operational Queue Strip -->
+            <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
+                <Link
+                    href="/admin/leaves"
+                    class="flex items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs shadow-xs transition hover:border-[#8B5E3C]"
+                >
+                    <span class="flex items-center gap-2 font-medium text-stone-800">
+                        <CalendarCheck class="size-4 text-[#6F3E1D]" />
+                        Persetujuan Cuti/Izin
+                    </span>
+                    <span
+                        class="rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold {pendingLeaveCount > 0
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-stone-100 text-stone-600'}"
+                    >
+                        {pendingLeaveCount}
+                    </span>
+                </Link>
+                <Link
+                    href="/admin/master-data"
+                    class="flex items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs shadow-xs transition hover:border-[#8B5E3C]"
+                >
+                    <span class="flex items-center gap-2 font-medium text-stone-800">
+                        <Store class="size-4 text-[#6F3E1D]" />
+                        Data Master &amp; NOO
+                    </span>
+                    <span
+                        class="rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold {pendingNooCount > 0
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-stone-100 text-stone-600'}"
+                    >
+                        {pendingNooCount} NOO
+                    </span>
+                </Link>
+                <Link
+                    href="/admin/talenta-mapping"
+                    class="flex items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs shadow-xs transition hover:border-[#8B5E3C]"
+                >
+                    <span class="flex items-center gap-2 font-medium text-stone-800">
+                        <FileCheck class="size-4 text-[#6F3E1D]" />
+                        Mapping Talenta
+                    </span>
+                    <Database class="size-3.5 text-stone-400" />
+                </Link>
+                <Link
+                    href="/admin/audit-logs"
+                    class="flex items-center justify-between rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs shadow-xs transition hover:border-[#8B5E3C]"
+                >
+                    <span class="flex items-center gap-2 font-medium text-stone-800">
+                        <History class="size-4 text-[#6F3E1D]" />
+                        Riwayat Audit
+                    </span>
+                    <span class="font-mono text-[11px] text-stone-500">Hash Chain</span>
+                </Link>
             </div>
 
             {#if feedback}
@@ -518,6 +679,7 @@
                     <option value="Cuti">Cuti</option>
                     <option value="Izin">Izin</option>
                     <option value="Sakit">Sakit</option>
+                    <option value="Libur">Libur</option>
                 </select>
                 <select
                     bind:value={filterFlag}
@@ -526,9 +688,18 @@
                     <option value="">Semua Flag Anomali</option>
                     <option value="OUT_OF_RADIUS">OUT_OF_RADIUS</option>
                     <option value="UNCERTAIN_ACCURACY">UNCERTAIN_ACCURACY</option>
+                    <option value="LOW_ACCURACY">LOW_ACCURACY</option>
                     <option value="SHARED_DEVICE">SHARED_DEVICE</option>
                     <option value="IMPOSSIBLE_TRAVEL">IMPOSSIBLE_TRAVEL</option>
+                    <option value="REPEATED_COORDS">REPEATED_COORDS</option>
+                    <option value="CONSTANT_ACCURACY">CONSTANT_ACCURACY</option>
+                    <option value="STALE_TIMESTAMP">STALE_TIMESTAMP</option>
+                    <option value="EARLY_LEAVE">EARLY_LEAVE</option>
                     <option value="MISSED_CLOCK_OUT">MISSED_CLOCK_OUT</option>
+                    <option value="MISSED_VISIT_OUT">MISSED_VISIT_OUT</option>
+                    <option value="OFFSITE_DUTY">OFFSITE_DUTY</option>
+                    <option value="OFF_DAY_ATTENDANCE">OFF_DAY_ATTENDANCE</option>
+                    <option value="UNVERIFIED_OUTLET">UNVERIFIED_OUTLET</option>
                     <option value="SHORT_DURATION">SHORT_DURATION</option>
                 </select>
             </div>
@@ -668,9 +839,24 @@
                                     </span>
                                 </td>
                                 <td class="px-2.5 py-1.5">
-                                    <span class={statusBadgeClass(row.verification_status)}>
-                                        {row.verification_status}
-                                    </span>
+                                    <div class="flex flex-wrap items-center gap-1.5">
+                                        <span class={statusBadgeClass(row.verification_status)}>
+                                            {row.verification_status}
+                                        </span>
+                                        {#if row.rejected_log_id !== null && row.user_id !== currentUserId}
+                                            <Button
+                                                size="sm"
+                                                variant="outline"
+                                                class="h-6 border-amber-300 px-2 text-[11px] text-amber-800 hover:bg-amber-50"
+                                                onclick={() => {
+                                                    correctTarget = row;
+                                                    correctReason = '';
+                                                }}
+                                            >
+                                                Koreksi
+                                            </Button>
+                                        {/if}
+                                    </div>
                                 </td>
                             </tr>
                         {/each}
@@ -678,10 +864,72 @@
                 </table>
             </section>
 
+            <!-- Rincian Kunjungan Toko Sales -->
+            <section class="overflow-x-auto rounded-lg border border-stone-200 bg-white shadow-xs">
+                <div class="border-b border-stone-200 px-3 py-2.5">
+                    <h2 class="text-sm font-semibold text-stone-900">
+                        Rincian Kunjungan Toko Sales ({salesVisits.length})
+                    </h2>
+                </div>
+                {#if salesVisits.length === 0}
+                    <p class="px-3 py-3 text-xs text-stone-500">
+                        Belum ada kunjungan toko pada tanggal {selectedDate}.
+                    </p>
+                {:else}
+                    <table class="w-full text-left">
+                        <thead>
+                            <tr class="h-8 bg-stone-100 text-[11px] uppercase tracking-wide text-stone-600">
+                                <th class="px-2.5">Sales</th>
+                                <th class="px-2.5">Toko</th>
+                                <th class="px-2.5">Waktu (In - Out)</th>
+                                <th class="px-2.5">Durasi</th>
+                                <th class="px-2.5">Aktivitas</th>
+                                <th class="px-2.5">Status</th>
+                                <th class="px-2.5">Catatan</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-stone-200 text-[13px] text-stone-800">
+                            {#each salesVisits as v (v.id)}
+                                <tr class="hover:bg-stone-50">
+                                    <td class="px-2.5 py-1.5 whitespace-nowrap">
+                                        <span class="font-mono text-xs text-stone-500">{v.nik}</span>
+                                        <span class="ml-1 font-medium">{v.name}</span>
+                                    </td>
+                                    <td class="px-2.5 py-1.5 text-xs">
+                                        <span class="font-mono text-stone-500">{v.outlet_code}</span>
+                                        {v.outlet_name}
+                                    </td>
+                                    <td class="px-2.5 py-1.5 font-mono text-xs tabular-nums">
+                                        {v.visit_in ?? '-'} - {v.visit_out ?? '-'}
+                                    </td>
+                                    <td class="px-2.5 py-1.5 font-mono text-xs tabular-nums">
+                                        {v.duration_minutes !== null ? `${v.duration_minutes}m` : '-'}
+                                    </td>
+                                    <td class="px-2.5 py-1.5 text-xs">{v.activity_category}</td>
+                                    <td class="px-2.5 py-1.5">
+                                        <div class="flex flex-wrap items-center gap-1">
+                                            <span class={statusBadgeClass(v.verification_status)}>
+                                                {v.visit_status} / {v.verification_status}
+                                            </span>
+                                            {#each v.anomaly_flags as fl (fl)}
+                                                <span class={flagBadgeClass(fl)}>{fl}</span>
+                                            {/each}
+                                        </div>
+                                    </td>
+                                    <td class="max-w-xs truncate px-2.5 py-1.5 text-xs text-stone-600">
+                                        {v.notes ?? '-'}
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                {/if}
+            </section>
+
             <!-- Input Absen Manual Darurat HR -->
             <section class="rounded-lg border border-stone-200 bg-white p-3 shadow-xs">
                 <h2 class="mb-2 text-sm font-semibold text-stone-900">
-                    Input Absen Manual Darurat (HR)
+                    Input Absen Manual Darurat (HR, 7 Hari Terakhir)
                 </h2>
                 <div class="grid gap-2 md:grid-cols-6">
                     <select
@@ -698,6 +946,7 @@
                     <Input
                         type="date"
                         bind:value={manualDate}
+                        max={todayDate}
                         class="h-9 border-stone-300 font-mono text-xs"
                     />
                     <select
@@ -865,10 +1114,14 @@
                     <span class="mr-auto text-xs text-red-700">
                         Dilarang menyetujui atau menolak absensi milik sendiri.
                     </span>
+                {:else if activeReview.review_locked}
+                    <span class="mr-auto text-xs text-amber-700">
+                        Menunggu persetujuan Dinas Luar sebelum absensi ini dapat diverifikasi.
+                    </span>
                 {/if}
                 <Button
                     size="sm"
-                    disabled={busy || isSelfReview}
+                    disabled={busy || isSelfReview || activeReview.review_locked}
                     class="h-8 bg-green-700 px-3 text-xs text-white hover:bg-green-800"
                     onclick={() =>
                         activeReview && reviewOne(activeReview, 'APPROVED')}
@@ -877,7 +1130,7 @@
                 </Button>
                 <Button
                     size="sm"
-                    disabled={busy || isSelfReview}
+                    disabled={busy || isSelfReview || activeReview.review_locked}
                     class="h-8 bg-red-700 px-3 text-xs text-white hover:bg-red-800"
                     onclick={() =>
                         activeReview && reviewOne(activeReview, 'REJECTED')}
@@ -893,6 +1146,55 @@
                     }}
                 >
                     Tutup
+                </Button>
+            </div>
+        </div>
+    </div>
+{/if}
+
+<!-- Modal Koreksi Status REJECTED -> APPROVED -->
+{#if correctTarget}
+    <div
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        role="dialog"
+        aria-modal="true"
+    >
+        <div class="w-full max-w-md rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
+            <h3 class="text-sm font-semibold text-stone-900">
+                Koreksi Status Absensi (REJECTED &rarr; APPROVED)
+            </h3>
+            <p class="mt-1 text-xs text-stone-600">
+                <span class="font-mono">{correctTarget.nik}</span> {correctTarget.name} &mdash;
+                Fase <span class="font-mono font-semibold">{correctTarget.rejected_phase}</span> ({selectedDate})
+            </p>
+            <label class="mt-3 block text-xs font-medium text-stone-700">
+                Alasan Koreksi (wajib dicatat ke Audit Log)
+                <textarea
+                    bind:value={correctReason}
+                    rows="3"
+                    class="mt-1 w-full rounded-md border border-stone-300 p-2 text-xs"
+                    placeholder="Contoh: Karyawan sudah menunjukkan bukti foto/izin..."
+                ></textarea>
+            </label>
+            <div class="mt-4 flex justify-end gap-2">
+                <Button
+                    size="sm"
+                    variant="outline"
+                    class="h-8 border-stone-300 px-3 text-xs"
+                    onclick={() => {
+                        correctTarget = null;
+                        correctReason = '';
+                    }}
+                >
+                    Batal
+                </Button>
+                <Button
+                    size="sm"
+                    disabled={busy}
+                    class="h-8 bg-[#6F3E1D] px-3 text-xs text-white hover:bg-[#583015]"
+                    onclick={submitCorrection}
+                >
+                    Simpan Koreksi
                 </Button>
             </div>
         </div>

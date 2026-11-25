@@ -15,6 +15,8 @@ use Illuminate\Support\Carbon;
  * @property int|null $shift_id
  * @property bool $is_day_off
  * @property ScheduleSource $source
+ * @property string|null $notes
+ * @property Carbon|null $replacement_for_date
  * @property int $created_by
  * @property-read Shift|null $shift
  */
@@ -24,6 +26,8 @@ use Illuminate\Support\Carbon;
     'shift_id',
     'is_day_off',
     'source',
+    'notes',
+    'replacement_for_date',
     'created_by',
 ])]
 class UserShiftSchedule extends Model
@@ -37,6 +41,7 @@ class UserShiftSchedule extends Model
             'work_date' => 'date',
             'is_day_off' => 'boolean',
             'source' => ScheduleSource::class,
+            'replacement_for_date' => 'date',
         ];
     }
 

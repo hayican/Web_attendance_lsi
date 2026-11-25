@@ -35,6 +35,7 @@
             id: number;
             destination_location: string;
             scheduled_start_time: string;
+            status: string;
         } | null;
         activeLog: {
             id: number;
@@ -70,12 +71,14 @@
         null,
     );
     let notes = $state('');
+    let latePermission = $state(false);
     let submitting = $state(false);
     let feedback = $state<{ type: 'error' | 'success'; message: string } | null>(
         null,
     );
     let clockOffsetMs = $state(0);
     let nowText = $state('');
+    let nowComparable = $state('');
     let timer: ReturnType<typeof setInterval> | null = null;
 
     function updateClock() {
@@ -85,6 +88,12 @@
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
+            hour12: false,
+        }).format(current);
+        nowComparable = new Intl.DateTimeFormat('en-GB', {
+            timeZone: office.timezone,
+            hour: '2-digit',
+            minute: '2-digit',
             hour12: false,
         }).format(current);
     }
@@ -112,6 +121,24 @@
     );
     const isFinishedToday = $derived(
         activeLog !== null && activeLog.clock_out_at !== null,
+    );
+
+    const lateLimit = $derived.by(() => {
+        if (!shift) return '';
+
+        const [hour = 0, minute = 0] = shift.start_time.split(':').map(Number);
+        const total = hour * 60 + minute + shift.grace_period_minutes;
+
+        return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+    });
+
+    const isLateNow = $derived(
+        !isClockOutMode &&
+            !isDayOff &&
+            dinasLuar === null &&
+            shift !== null &&
+            nowComparable !== '' &&
+            nowComparable > lateLimit,
     );
 
     async function submitAttendance() {
@@ -145,6 +172,9 @@
             form.append('photo', capturedPhoto.blob, 'selfie.jpg');
             if (notes.trim()) {
                 form.append('notes', notes.trim());
+            }
+            if (isLateNow && latePermission) {
+                form.append('is_late_permission', '1');
             }
 
             const endpoint = isClockOutMode
@@ -182,6 +212,7 @@
 
             capturedPhoto = null;
             notes = '';
+            latePermission = false;
             feedback = {
                 type: 'success',
                 message: isClockOutMode
@@ -231,7 +262,10 @@
 
         {#if dinasLuar}
             <p class="mt-2 rounded-md bg-blue-50 p-2 text-xs text-blue-800">
-                Mode Dinas Luar Disetujui: {dinasLuar.destination_location} (Acuan
+                {dinasLuar.status === 'PENDING'
+                    ? 'Mode Dinas Luar (menunggu persetujuan HR)'
+                    : 'Mode Dinas Luar Disetujui'}:
+                {dinasLuar.destination_location} (Acuan
                 {dinasLuar.scheduled_start_time.slice(0, 5)})
             </p>
         {/if}
@@ -305,6 +339,13 @@
                     capturedPhoto = payload;
                 }}
             />
+
+            {#if isLateNow}
+                <label class="flex items-center gap-2 text-xs">
+                    <input type="checkbox" bind:checked={latePermission} />
+                    <span>Izin Masuk Siang (wajib catatan minimal 10 karakter)</span>
+                </label>
+            {/if}
 
             <textarea
                 bind:value={notes}

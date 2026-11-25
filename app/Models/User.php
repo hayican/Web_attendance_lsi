@@ -32,6 +32,8 @@ use Illuminate\Support\Carbon;
  * @property string|null $job_level
  * @property string|null $employment_status
  * @property bool $is_active
+ * @property bool $can_view_audit_logs
+ * @property Carbon|null $deactivated_at
  * @property Carbon|null $email_verified_at
  * @property string|null $remember_token
  * @property Carbon|null $created_at
@@ -54,6 +56,8 @@ use Illuminate\Support\Carbon;
     'job_level',
     'employment_status',
     'is_active',
+    'can_view_audit_logs',
+    'deactivated_at',
 ])]
 #[Hidden(['password', 'two_factor_secret', 'two_factor_recovery_codes', 'remember_token'])]
 class User extends Authenticatable implements MustVerifyEmail
@@ -70,6 +74,8 @@ class User extends Authenticatable implements MustVerifyEmail
             'role' => UserRole::class,
             'must_change_password' => 'boolean',
             'is_active' => 'boolean',
+            'can_view_audit_logs' => 'boolean',
+            'deactivated_at' => 'datetime',
             'join_date' => 'date',
             'consent_accepted_at' => 'datetime',
             'email_verified_at' => 'datetime',

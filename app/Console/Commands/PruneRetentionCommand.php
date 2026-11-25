@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\AttendanceLog;
 use App\Models\LeaveRequest;
 use App\Models\SalesVisit;
+use App\Models\User;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Storage;
 
@@ -87,6 +88,27 @@ class PruneRetentionCommand extends Command
                 $disk->delete($leave->attachment_path);
             }
             $leave->update(['attachment_path' => null]);
+        }
+
+        $inactiveUsers = User::query()
+            ->where('is_active', false)
+            ->whereNotNull('deactivated_at')
+            ->where('deactivated_at', '<', $cutoff)
+            ->whereNotNull('reference_photo_url')
+            ->get();
+
+        foreach ($inactiveUsers as $user) {
+            $path = $user->reference_photo_url;
+            if ($path === null) {
+                continue;
+            }
+
+            $deleted = $disk->delete($path);
+            if ($deleted || ! $disk->exists($path)) {
+                $user->update(['reference_photo_url' => null]);
+            } else {
+                $this->warn("Gagal menghapus foto referensi user #{$user->id}: {$path}");
+            }
         }
 
         $this->info('Retention cleanup completed.');

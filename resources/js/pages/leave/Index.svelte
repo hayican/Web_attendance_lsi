@@ -9,8 +9,11 @@
         balance: {
             year: number;
             base_quota: number;
+            prorated_deduction: number;
+            collective_leave_deduction: number;
             used_days: number;
             pending_days: number;
+            adjustment_days: number;
             available_balance: number;
             eligible_for_annual_leave: boolean;
         };
@@ -83,6 +86,8 @@
             const data = (await res.json()) as {
                 message?: string;
                 errors?: Record<string, string[]>;
+                monthly_limit_warning?: boolean;
+                hr_conflict_warning?: boolean;
             };
 
             if (!res.ok) {
@@ -95,7 +100,18 @@
 
             reason = '';
             attachmentFile = null;
-            message = 'Pengajuan berhasil dikirim.';
+            const warnings: string[] = [];
+            if (data.monthly_limit_warning) {
+                warnings.push(
+                    'Cuti melebihi 2 hari/bulan; HR akan meminta konfirmasi sebelum menyetujui.',
+                );
+            }
+            if (data.hr_conflict_warning) {
+                warnings.push(
+                    'Jumlah HR Admin yang masuk kerja pada tanggal tersebut kurang dari 2 orang.',
+                );
+            }
+            message = `Pengajuan berhasil dikirim.${warnings.length > 0 ? ' ' + warnings.join(' ') : ''}`;
             router.reload();
         } finally {
             submitting = false;
@@ -126,8 +142,19 @@
         </p>
         <p class="text-2xl font-bold">{balance.available_balance} Hari</p>
         <p class="mt-1 text-xs text-muted-foreground">
-            Jatah: {balance.base_quota} | Terpakai: {balance.used_days} |
-            Pending: {balance.pending_days}
+            Jatah: {balance.base_quota} | Prorata: -{balance.prorated_deduction} |
+            Cutber: -{balance.collective_leave_deduction} | Terpakai:
+            {balance.used_days} | Pending: {balance.pending_days}
+            {#if balance.adjustment_days !== 0}
+                | Penyesuaian: +{balance.adjustment_days}
+            {/if}
+        </p>
+        <p class="mt-1 text-[11px] text-muted-foreground">
+            {#if balance.eligible_for_annual_leave}
+                Potongan Cuti Bersama (Cutber) mengurangi saldo cuti tahunan sesuai kalender libur perusahaan.
+            {:else}
+                Masa kerja &lt; 1 tahun: Cuti Bersama tidak memotong saldo cuti (Cutber 0 hari).
+            {/if}
         </p>
     </div>
 
