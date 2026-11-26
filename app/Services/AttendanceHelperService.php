@@ -31,6 +31,9 @@ class AttendanceHelperService
             ->where('user_id', $userId)
             ->whereDate('leave_date', $localDate)
             ->where('status', LeaveDayStatus::PENDING)
+            ->whereHas('leaveRequest', function ($query): void {
+                $query->where('type', '!=', LeaveType::DINAS_LUAR);
+            })
             ->get();
 
         foreach ($pendingDays as $day) {

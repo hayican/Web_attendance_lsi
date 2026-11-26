@@ -4,20 +4,24 @@ use App\Enums\HolidayType;
 use App\Enums\LeaveDayStatus;
 use App\Enums\LeaveStatus;
 use App\Enums\LeaveType;
+use App\Enums\ScheduleSource;
 use App\Enums\UserRole;
 use App\Models\Holiday;
 use App\Models\LeaveBalance;
 use App\Models\LeaveRequest;
+use App\Models\LeaveRequestDay;
 use App\Models\Location;
 use App\Models\Shift;
 use App\Models\ShiftPattern;
 use App\Models\User;
+use App\Models\UserShiftSchedule;
 use App\Services\LeaveBalanceService;
 use App\Services\ShiftScheduleGeneratorService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Inertia\Testing\AssertableInertia;
 
 function makePatternedUser(string $joinDate, UserRole $role = UserRole::EMPLOYEE_OFFICE): User
 {
@@ -149,8 +153,8 @@ test('SAKIT requires SKD, DINAS_LUAR forbidden for sales, monthly > 2 days requi
     // 3-day CUTI triggers monthly limit soft warning + HR override confirmation (409 -> confirm -> 200)
     $cutiRes = $this->actingAs($office)->postJson('/leave', [
         'type' => LeaveType::CUTI->value,
-        'start_date' => '2026-11-25',
-        'end_date' => '2026-11-27',
+        'start_date' => '2026-11-26',
+        'end_date' => '2026-11-30',
         'reason' => 'Acara keluarga',
     ])->assertCreated()->assertJsonPath('monthly_limit_warning', true);
 
@@ -166,9 +170,9 @@ test('SAKIT requires SKD, DINAS_LUAR forbidden for sales, monthly > 2 days requi
         ->assertOk()
         ->assertJsonPath('leave_request.status', LeaveStatus::APPROVED->value);
 
-    // Partial cancel 1 day (2026-11-27) -> PARTIALLY_CANCELLED & used_days drops 3 -> 2
+    // Partial cancel 1 day (2026-11-30) -> PARTIALLY_CANCELLED & used_days drops 3 -> 2
     $leave = LeaveRequest::query()->with('days')->findOrFail($leaveId);
-    $lastDayId = $leave->days->firstWhere('leave_date', CarbonImmutable::parse('2026-11-27'))?->id;
+    $lastDayId = $leave->days->firstWhere('leave_date', CarbonImmutable::parse('2026-11-30'))?->id;
 
     $this->actingAs($hr)
         ->postJson("/admin/leaves/{$leaveId}/partial-cancel", [
@@ -217,6 +221,7 @@ test('annual maintenance scheduler handles 1-year anniversary proration, Feb 29 
     // July 10, 2026 (exact 1-year anniversary): julyHire gets 12 - 6 = 6 days & collective leave deduction 1
     CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-07-10 00:05:00', 'Asia/Jakarta'));
     $this->artisan('leave:annual-maintenance')->assertSuccessful();
+    $this->artisan('leave:annual-maintenance')->assertSuccessful();
     $julyBal->refresh();
     expect((float) $julyBal->base_quota)->toBe(12.0)
         ->and((float) $julyBal->prorated_deduction)->toBe(6.0)
@@ -239,4 +244,160 @@ test('annual maintenance scheduler handles 1-year anniversary proration, Feb 29 
         ->and((float) $junior2027->collective_leave_deduction)->toBe(0.0);
 
     CarbonImmutable::setTestNow();
+});
+
+test('CUTI requires at least H-3 effective workdays before start', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 09:00:00', 'Asia/Jakarta'));
+
+    $user = makePatternedUser('2024-01-01');
+    app(ShiftScheduleGeneratorService::class)->generateForUser(
+        $user,
+        CarbonImmutable::parse('2026-11-20', 'Asia/Jakarta'),
+        30,
+    );
+
+    // 2026-11-25 is only H-2 effective days away from Monday 2026-11-23.
+    $this->actingAs($user)->postJson('/leave', [
+        'type' => LeaveType::CUTI->value,
+        'start_date' => '2026-11-25',
+        'end_date' => '2026-11-25',
+        'reason' => 'Keperluan keluarga',
+    ])->assertUnprocessable()->assertJsonValidationErrors('start_date');
+
+    // 2026-11-26 is exactly H-3 effective days away.
+    $this->actingAs($user)->postJson('/leave', [
+        'type' => LeaveType::CUTI->value,
+        'start_date' => '2026-11-26',
+        'end_date' => '2026-11-26',
+        'reason' => 'Keperluan keluarga',
+    ])->assertCreated();
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales effective workday honors a manual day-off override', function () {
+    $office = Location::factory()->create(['work_days' => [1, 2, 3, 4, 5]]);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $service = app(LeaveBalanceService::class);
+    expect($service->isEffectiveWorkDay($sales, '2026-11-23'))->toBeTrue();
+
+    UserShiftSchedule::query()->create([
+        'user_id' => $sales->id,
+        'work_date' => '2026-11-23',
+        'shift_id' => null,
+        'is_day_off' => true,
+        'source' => ScheduleSource::MANUAL_OVERRIDE,
+        'created_by' => $sales->id,
+    ]);
+
+    expect($service->isEffectiveWorkDay($sales, '2026-11-23'))->toBeFalse();
+});
+
+test('dinas luar scheduled start cannot pass the shift end on an effective day', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-20 09:00:00', 'Asia/Jakarta'));
+
+    $user = makePatternedUser('2024-01-01');
+    $shiftId = $user->defaultShiftPattern?->mon_shift_id;
+
+    UserShiftSchedule::query()->create([
+        'user_id' => $user->id,
+        'work_date' => '2026-11-23',
+        'shift_id' => $shiftId,
+        'is_day_off' => false,
+        'source' => ScheduleSource::PATTERN,
+        'created_by' => $user->id,
+    ]);
+
+    $this->actingAs($user)->postJson('/leave', [
+        'type' => LeaveType::DINAS_LUAR->value,
+        'start_date' => '2026-11-23',
+        'end_date' => '2026-11-23',
+        'reason' => 'Meeting klien pagi',
+        'destination_location' => 'Bandung',
+        'scheduled_start_time' => '17:00',
+    ])->assertUnprocessable()->assertJsonValidationErrors('scheduled_start_time');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('leave page exposes calendar context and monthly cuti usage', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 09:00:00', 'Asia/Jakarta'));
+
+    $user = makePatternedUser('2024-01-01');
+    app(ShiftScheduleGeneratorService::class)->generateForUser(
+        $user,
+        CarbonImmutable::parse('2026-11-18', 'Asia/Jakarta'),
+        95,
+    );
+
+    $leave = LeaveRequest::query()->create([
+        'user_id' => $user->id,
+        'type' => LeaveType::CUTI,
+        'start_date' => '2026-11-20',
+        'end_date' => '2026-11-20',
+        'total_days' => 1.0,
+        'reason' => 'Keperluan keluarga',
+        'status' => LeaveStatus::APPROVED,
+    ]);
+
+    LeaveRequestDay::query()->create([
+        'leave_request_id' => $leave->id,
+        'user_id' => $user->id,
+        'leave_date' => '2026-11-20',
+        'day_value' => 1.0,
+        'status' => LeaveDayStatus::APPROVED,
+    ]);
+
+    $this->actingAs($user)
+        ->get('/leave')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('office/Pengajuan')
+            ->where('calendar.requires_published_schedule', true)
+            ->where('calendar.max_date', '2027-02-21')
+            ->where('calendar.min_start_dates.CUTI', '2026-11-26')
+            ->where('cutiDaysByMonth.2026-11', 1)
+            ->where('calendar.work_dates', fn ($dates): bool => collect($dates)->contains('2026-11-24'))
+        );
+
+    CarbonImmutable::setTestNow();
+});
+
+test('leave page uses sales-specific page component for sales', function () {
+    $office = Location::factory()->create();
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $this->actingAs($sales)
+        ->get('/leave')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('sales/Pengajuan')
+        );
+});
+
+test('hr leave has separate mobile and desktop page components', function () {
+    $hr = makePatternedUser('2024-01-01', UserRole::HR_ADMIN);
+
+    $this->actingAs($hr)
+        ->get('/leave')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/PengajuanSayaMobile')
+        );
+
+    $this->actingAs($hr)
+        ->get('/admin/pengajuan-saya')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/PengajuanSaya')
+        );
 });

@@ -6,11 +6,13 @@ use App\Enums\AttendanceSource;
 use App\Enums\LeaveDayStatus;
 use App\Enums\LeaveStatus;
 use App\Enums\LeaveType;
+use App\Enums\ScheduleSource;
 use App\Enums\UserRole;
 use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
 use App\Http\Controllers\Controller;
 use App\Models\AttendanceLog;
+use App\Models\Holiday;
 use App\Models\LeaveBalance;
 use App\Models\LeaveRequest;
 use App\Models\LeaveRequestDay;
@@ -40,6 +42,26 @@ class LeaveController extends Controller
     {
         /** @var User $user */
         $user = $request->user();
+
+        $component = match ($user->role) {
+            UserRole::EMPLOYEE_SALES => 'sales/Pengajuan',
+            UserRole::HR_ADMIN => 'admin/PengajuanSayaMobile',
+            default => 'office/Pengajuan',
+        };
+
+        return $this->renderIndexPage($user, $component);
+    }
+
+    public function adminIndex(Request $request): Response
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        return $this->renderIndexPage($user, 'admin/PengajuanSaya');
+    }
+
+    private function renderIndexPage(User $user, string $component): Response
+    {
         $user->load('officeLocation');
 
         $timezone = $user->officeLocation->timezone;
@@ -61,7 +83,14 @@ class LeaveController extends Controller
                 return $arr;
             });
 
-        return Inertia::render('leave/Index', [
+        $calendar = $this->buildCalendarContext($user, $todayLocal);
+        $cutiDaysByMonth = $this->cutiDaysByMonth(
+            $user,
+            $todayLocal,
+            CarbonImmutable::parse($calendar['max_date'], $timezone),
+        );
+
+        return Inertia::render($component, [
             'balance' => [
                 'year' => $balance->year,
                 'base_quota' => (float) $balance->base_quota,
@@ -76,6 +105,8 @@ class LeaveController extends Controller
             'requests' => $requests,
             'todayDate' => $todayLocal->toDateString(),
             'canSubmitDinasLuar' => $user->role !== UserRole::EMPLOYEE_SALES,
+            'calendar' => $calendar,
+            'cutiDaysByMonth' => $cutiDaysByMonth,
         ]);
     }
 
@@ -128,6 +159,12 @@ class LeaveController extends Controller
             if ($startDate->lessThan($todayLocal)) {
                 throw ValidationException::withMessages([
                     'start_date' => ['Cuti Tahunan tidak dapat diajukan mundur (backdate).'],
+                ]);
+            }
+
+            if (! $this->isAtLeastThreeEffectiveWorkDaysAhead($user, $todayLocal, $startDate)) {
+                throw ValidationException::withMessages([
+                    'start_date' => ['Cuti Tahunan wajib diajukan minimal H-3 hari kerja efektif sebelum tanggal mulai.'],
                 ]);
             }
         }
@@ -233,6 +270,23 @@ class LeaveController extends Controller
             }
 
             $val = $this->balanceService->isEffectiveWorkDay($user, $dateStr) ? 1.0 : 0.0;
+
+            if ($type === LeaveType::DINAS_LUAR && $val > 0.0) {
+                $scheduledStart = substr((string) $validated['scheduled_start_time'], 0, 5);
+                $daySchedule = UserShiftSchedule::query()
+                    ->with('shift:id,end_time')
+                    ->where('user_id', $user->id)
+                    ->whereDate('work_date', $dateStr)
+                    ->first();
+                $shiftEnd = $daySchedule?->shift?->end_time;
+
+                if ($shiftEnd !== null && $scheduledStart > substr($shiftEnd, 0, 5)) {
+                    throw ValidationException::withMessages([
+                        'scheduled_start_time' => ["Jam mulai Dinas Luar melewati jam pulang shift pada {$dateStr}."],
+                    ]);
+                }
+            }
+
             $dayRows[] = [
                 'date' => $dateStr,
                 'year' => $cursor->year,
@@ -339,7 +393,8 @@ class LeaveController extends Controller
             $otherHrOnLeave = LeaveRequestDay::query()
                 ->where('user_id', '!=', $user->id)
                 ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
-                ->whereBetween('leave_date', [$startDate->toDateString(), $endDate->toDateString()])
+                ->whereDate('leave_date', '>=', $startDate->toDateString())
+                ->whereDate('leave_date', '<=', $endDate->toDateString())
                 ->whereHas('user', fn ($q) => $q->where('role', UserRole::HR_ADMIN)->where('is_active', true))
                 ->distinct('user_id')
                 ->count('user_id');
@@ -402,6 +457,148 @@ class LeaveController extends Controller
         return response()->json(['leave_request' => $leaveRequest->fresh('days')]);
     }
 
+    /**
+     * @return array{
+     *     max_date: string,
+     *     work_dates: list<string>,
+     *     published_dates: list<string>,
+     *     requires_published_schedule: bool,
+     *     min_start_dates: array{CUTI: string|null, IZIN: string, SAKIT: string, DINAS_LUAR: string}
+     * }
+     */
+    private function buildCalendarContext(User $user, CarbonImmutable $todayLocal): array
+    {
+        $timezone = $user->officeLocation->timezone;
+        $isSales = $user->role === UserRole::EMPLOYEE_SALES;
+        $windowStart = $todayLocal->subDays(21);
+
+        if ($isSales) {
+            $maxDate = $todayLocal->addDays(90);
+        } else {
+            $latestSchedule = $user->shiftSchedules()->max('work_date');
+            $maxDate = $latestSchedule !== null
+                ? CarbonImmutable::parse((string) $latestSchedule, $timezone)->startOfDay()
+                : $todayLocal->startOfDay();
+
+            if ($maxDate->lessThan($todayLocal)) {
+                $maxDate = $todayLocal->startOfDay();
+            }
+        }
+
+        $holidayDates = Holiday::query()
+            ->whereDate('holiday_date', '>=', $windowStart->toDateString())
+            ->whereDate('holiday_date', '<=', $maxDate->toDateString())
+            ->where(function ($query) use ($user): void {
+                $query->whereNull('location_id')
+                    ->orWhere('location_id', $user->office_location_id);
+            })
+            ->pluck('holiday_date')
+            ->map(fn ($date): string => CarbonImmutable::parse((string) $date)->toDateString())
+            ->all();
+        $holidaySet = array_fill_keys($holidayDates, true);
+
+        $workDates = [];
+        $publishedDates = [];
+
+        if ($isSales) {
+            $locationWorkDays = $user->officeLocation->work_days;
+            $manualDayOffDates = $user->shiftSchedules()
+                ->whereDate('work_date', '>=', $windowStart->toDateString())
+                ->whereDate('work_date', '<=', $maxDate->toDateString())
+                ->where('source', ScheduleSource::MANUAL_OVERRIDE->value)
+                ->where('is_day_off', true)
+                ->pluck('work_date')
+                ->map(fn ($date): string => CarbonImmutable::parse((string) $date)->toDateString())
+                ->all();
+            $manualDayOffSet = array_fill_keys($manualDayOffDates, true);
+
+            for ($cursor = $windowStart; $cursor->lessThanOrEqualTo($maxDate); $cursor = $cursor->addDay()) {
+                $date = $cursor->toDateString();
+
+                if (isset($holidaySet[$date]) || isset($manualDayOffSet[$date])) {
+                    continue;
+                }
+
+                if (in_array($cursor->dayOfWeekIso, $locationWorkDays, true)) {
+                    $workDates[] = $date;
+                }
+            }
+        } else {
+            $schedules = $user->shiftSchedules()
+                ->whereDate('work_date', '>=', $windowStart->toDateString())
+                ->whereDate('work_date', '<=', $maxDate->toDateString())
+                ->get(['work_date', 'is_day_off']);
+
+            foreach ($schedules as $schedule) {
+                $date = $schedule->work_date->toDateString();
+                $publishedDates[] = $date;
+
+                if (! $schedule->is_day_off && ! isset($holidaySet[$date])) {
+                    $workDates[] = $date;
+                }
+            }
+
+            sort($publishedDates);
+        }
+
+        sort($workDates);
+
+        $minBackdate = $this->findMinBackdateDate($user, $todayLocal, 2)->toDateString();
+        $minStartDates = [
+            'CUTI' => null,
+            'IZIN' => $minBackdate,
+            'SAKIT' => $minBackdate,
+            'DINAS_LUAR' => $todayLocal->addDay()->toDateString(),
+        ];
+
+        $workDateSet = array_fill_keys($workDates, true);
+        $cursor = $todayLocal;
+        $counted = 0;
+
+        while ($counted < 3 && $cursor->lessThanOrEqualTo($maxDate)) {
+            if (isset($workDateSet[$cursor->toDateString()])) {
+                $counted++;
+            }
+
+            $cursor = $cursor->addDay();
+        }
+
+        if ($counted >= 3) {
+            $minStartDates['CUTI'] = $cursor->toDateString();
+        }
+
+        return [
+            'max_date' => $maxDate->toDateString(),
+            'work_dates' => $workDates,
+            'published_dates' => $publishedDates,
+            'requires_published_schedule' => ! $isSales,
+            'min_start_dates' => $minStartDates,
+        ];
+    }
+
+    /**
+     * @return array<string, float>
+     */
+    private function cutiDaysByMonth(User $user, CarbonImmutable $todayLocal, CarbonImmutable $maxDate): array
+    {
+        $rows = LeaveRequestDay::query()
+            ->where('user_id', $user->id)
+            ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
+            ->whereDate('leave_date', '>=', $todayLocal->startOfMonth()->toDateString())
+            ->whereDate('leave_date', '<=', $maxDate->toDateString())
+            ->whereHas('leaveRequest', fn ($query) => $query->where('type', LeaveType::CUTI))
+            ->get(['leave_date', 'day_value']);
+
+        $byMonth = [];
+
+        foreach ($rows as $row) {
+            $month = $row->leave_date->format('Y-m');
+            $byMonth[$month] = ($byMonth[$month] ?? 0.0) + (float) $row->day_value;
+        }
+
+        return $byMonth;
+    }
+
     private function findMinBackdateDate(User $user, CarbonImmutable $todayLocal, int $effectiveWorkDays): CarbonImmutable
     {
         $cursor = $todayLocal;
@@ -415,6 +612,27 @@ class LeaveController extends Controller
         }
 
         return $cursor;
+    }
+
+    private function isAtLeastThreeEffectiveWorkDaysAhead(
+        User $user,
+        CarbonImmutable $todayLocal,
+        CarbonImmutable $startDate,
+    ): bool {
+        $cursor = $startDate->subDay();
+        $counted = 0;
+
+        for ($i = 0; $i < 30 && $counted < 3; $i++) {
+            if ($this->balanceService->isEffectiveWorkDay($user, $cursor->toDateString())) {
+                $counted++;
+                if ($counted === 3) {
+                    break;
+                }
+            }
+            $cursor = $cursor->subDay();
+        }
+
+        return $counted >= 3 && $todayLocal->lessThanOrEqualTo($cursor);
     }
 
     /**
@@ -436,7 +654,8 @@ class LeaveController extends Controller
 
             $existingInMonth = (float) LeaveRequestDay::query()
                 ->where('user_id', $userId)
-                ->whereBetween('leave_date', [$monthStart, $monthEnd])
+                ->whereDate('leave_date', '>=', $monthStart)
+                ->whereDate('leave_date', '<=', $monthEnd)
                 ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
                 ->whereHas('leaveRequest', fn ($q) => $q->where('type', LeaveType::CUTI))
                 ->sum('day_value');

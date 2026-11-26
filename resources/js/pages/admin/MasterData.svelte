@@ -14,6 +14,7 @@
     import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
     import CalendarDays from '@lucide/svelte/icons/calendar-days';
     import KeyRound from '@lucide/svelte/icons/key-round';
+    import MapPin from '@lucide/svelte/icons/map-pin';
     import Pencil from '@lucide/svelte/icons/pencil';
     import Plus from '@lucide/svelte/icons/plus';
     import RefreshCw from '@lucide/svelte/icons/refresh-cw';
@@ -24,7 +25,7 @@
     import AppHead from '@/components/AppHead.svelte';
     import { Button } from '@/components/ui/button';
     import { Input } from '@/components/ui/input';
-    import { readXsrfToken } from '@/lib/gpsClient';
+    import { readXsrfToken, requestFreshGps } from '@/lib/gpsClient';
 
     type LeaveBalanceItem = {
         year: number;
@@ -157,6 +158,7 @@
     let userRoleFilter = $state('');
     let outletStatusFilter = $state('');
     let outletSearch = $state('');
+    let holidayYearFilter = $state('');
 
     // Derived lists
     const offices = $derived(locations.filter((l) => l.type === 'OFFICE'));
@@ -206,6 +208,22 @@
     const badgeBase =
         'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium border whitespace-nowrap';
 
+    const holidayYears = $derived(
+        Array.from(new Set(holidays.map((h) => h.holiday_date.slice(0, 4)))).sort((a, b) =>
+            b.localeCompare(a),
+        ),
+    );
+
+    const effectiveHolidayYear = $derived(
+        holidayYears.includes(holidayYearFilter) ? holidayYearFilter : '',
+    );
+
+    const filteredHolidays = $derived(
+        effectiveHolidayYear === ''
+            ? holidays
+            : holidays.filter((h) => h.holiday_date.startsWith(effectiveHolidayYear)),
+    );
+
     function activeBadge(active: boolean): string {
         return active
             ? `${badgeBase} border-green-300 bg-green-50 text-green-700`
@@ -218,6 +236,27 @@
         if (status === 'PENDING_VERIFICATION')
             return `${badgeBase} border-yellow-300 bg-yellow-50 text-yellow-800`;
         return `${badgeBase} border-red-300 bg-red-50 text-red-700`;
+    }
+
+    function holidayTypeBadge(type: HolidayItem['holiday_type']): string {
+        if (type === 'COLLECTIVE_LEAVE')
+            return `${badgeBase} border-violet-300 bg-violet-50 text-violet-700`;
+        if (type === 'LOCAL')
+            return `${badgeBase} border-amber-300 bg-amber-50 text-amber-800`;
+        return `${badgeBase} border-sky-300 bg-sky-50 text-sky-700`;
+    }
+
+    function holidayTypeLabel(type: HolidayItem['holiday_type']): string {
+        if (type === 'COLLECTIVE_LEAVE') return 'Cuti Bersama';
+        if (type === 'LOCAL') return 'Lokal';
+        return 'Nasional';
+    }
+
+    function holidaySuccessText(base: string) {
+        return (data: JsonResponseData): string => {
+            const count = data.recalculated_leave_request_ids?.length ?? 0;
+            return count > 0 ? `${base} ${count} pengajuan cuti/izin direkalkulasi.` : base;
+        };
     }
 
     function shiftLabel(shiftId: number | null): string {
@@ -249,11 +288,17 @@
         return data.message || fallback;
     }
 
+    type JsonResponseData = {
+        message?: string;
+        errors?: Record<string, string[]>;
+        recalculated_leave_request_ids?: number[];
+    };
+
     async function sendJson(
         url: string,
         method: 'POST' | 'PATCH' | 'DELETE',
         payload: unknown,
-        okText: string,
+        okText: string | ((data: JsonResponseData) => string),
     ): Promise<boolean> {
         busy = true;
         errorMsg = null;
@@ -269,15 +314,12 @@
                 },
                 body: JSON.stringify(payload),
             });
-            const data = (await res.json().catch(() => ({}))) as {
-                message?: string;
-                errors?: Record<string, string[]>;
-            };
+            const data = (await res.json().catch(() => ({}))) as JsonResponseData;
             if (!res.ok) {
                 errorMsg = extractError(data, 'Operasi gagal diproses.');
                 return false;
             }
-            successMsg = okText;
+            successMsg = typeof okText === 'function' ? okText(data) : okText;
             router.reload();
             return true;
         } finally {
@@ -448,53 +490,78 @@
     let ovDate = $state('');
     let ovDayOff = $state(false);
     let ovShiftId = $state<number | ''>('');
+    let ovReplacementDate = $state('');
+    let ovNotes = $state('');
 
     let csvBalanceOpen = $state(false);
     let csvBalanceYear = $state(0);
-    let csvBalanceText = $state('nik,adjustment_days\nOFF001,2\nSLS001,-1');
+    let csvBalanceText = $state('nik,adjustment_days\nOFF001,2\nSLS001,-1.5');
+    const balancePreview = $derived.by(() => {
+        const b = balanceTarget?.leave_balances?.[0];
+        if (!b) return null;
+        const adj = Number(balAdj);
+
+        return (
+            Number(b.base_quota) -
+            Number(b.prorated_deduction) -
+            Number(b.collective_leave_deduction) -
+            Number(b.used_days) -
+            Number(b.pending_days) +
+            (Number.isFinite(adj) ? adj : 0)
+        );
+    });
     const csvBalanceRows = $derived.by(() => {
         const lines = csvBalanceText
+            .replace(/^\uFEFF/, '')
             .split(/\r?\n/)
-            .map((l) => l.trim())
+            .map((l) => l.trim().replace(/"/g, ''))
             .filter(Boolean);
 
-        return lines
+        const rows = lines
             .filter((line, idx) => {
                 if (idx !== 0) return true;
                 const firstCell = line.split(/[,;]/)[0]?.trim().toLowerCase() ?? '';
                 return firstCell !== 'nik';
             })
             .map((line) => {
-                const [nikRaw = '', adjRaw = '', baseRaw = '', prorataRaw = ''] = line
-                    .split(/[,;]/)
-                    .map((s) => s.trim());
+                const [nikRaw = '', adjRaw = ''] = line.split(/[,;]/).map((s) => s.trim());
                 const nikUpper = nikRaw.toUpperCase();
                 const formulaUnsafe =
                     /^[=+\-@\t\r]/.test(nikRaw) ||
                     /^[=+@\t\r]/.test(adjRaw) ||
                     (adjRaw.startsWith('-') && Number.isNaN(Number(adjRaw)));
                 const adjNum = Number(adjRaw);
-                const invalidAdj = adjRaw === '' || Number.isNaN(adjNum) || adjNum < -30 || adjNum > 30;
+                const invalidAdj =
+                    adjRaw === '' || Number.isNaN(adjNum) || adjNum < -30 || adjNum > 30;
+                const invalidStep = !invalidAdj && !Number.isInteger(adjNum * 2);
                 const matchedUser = users.find((u) => u.nik.toUpperCase() === nikUpper);
                 const isSelf = nikUpper !== '' && nikUpper === currentUserNik;
                 const notFound = !formulaUnsafe && !matchedUser;
-                const baseNum = baseRaw !== '' ? Number(baseRaw) : null;
-                const prorataNum = prorataRaw !== '' ? Number(prorataRaw) : null;
 
                 return {
                     nik: nikRaw,
                     userName: matchedUser?.name ?? '-',
-                    adjustment_days: invalidAdj ? 0 : adjNum,
-                    base_quota: baseNum !== null && !Number.isNaN(baseNum) ? baseNum : null,
-                    prorated_deduction:
-                        prorataNum !== null && !Number.isNaN(prorataNum) ? prorataNum : null,
+                    adjustment_days: Number.isNaN(adjNum) ? 0 : adjNum,
                     unsafe: formulaUnsafe,
                     invalidAdj,
+                    invalidStep,
                     notFound,
                     isSelf,
-                    hasError: formulaUnsafe || invalidAdj || notFound,
+                    duplicateNik: false,
+                    hasError: formulaUnsafe || invalidAdj || invalidStep || notFound,
                 };
             });
+
+        const nikCounts = new Map<string, number>();
+        for (const row of rows) {
+            const key = row.nik.trim().toUpperCase();
+            if (key !== '') nikCounts.set(key, (nikCounts.get(key) ?? 0) + 1);
+        }
+
+        return rows.map((row) => {
+            const duplicateNik = (nikCounts.get(row.nik.trim().toUpperCase()) ?? 0) > 1;
+            return { ...row, duplicateNik, hasError: row.hasError || duplicateNik };
+        });
     });
 
     // --- Shift Modal State ---
@@ -621,6 +688,23 @@
         lTimezone = loc?.timezone ?? 'Asia/Jakarta';
         lWorkDays = loc?.work_days ? [...loc.work_days] : [1, 2, 3, 4, 5, 6];
         locModalOpen = true;
+    }
+
+    let locGpsBusy = $state(false);
+
+    async function fillCurrentGpsForLocation() {
+        locGpsBusy = true;
+        try {
+            const res = await requestFreshGps(Number(lRadius) || 100);
+            if (res.lat !== null && res.lng !== null) {
+                lLat = Number(res.lat.toFixed(6));
+                lLng = Number(res.lng.toFixed(6));
+            } else if (res.message) {
+                alert(res.message);
+            }
+        } finally {
+            locGpsBusy = false;
+        }
     }
 
     function toggleWorkDay(day: number) {
@@ -789,13 +873,17 @@
                   `/admin/holidays/${editingHoliday.id}`,
                   'PATCH',
                   payload,
-                  'Hari libur diperbarui & pengajuan cuti/saldo terkait disinkronkan.',
+                  holidaySuccessText(
+                      'Hari libur diperbarui & pengajuan cuti/saldo terkait disinkronkan.',
+                  ),
               )
             : await sendJson(
                   '/admin/holidays',
                   'POST',
                   payload,
-                  'Hari libur ditambahkan & pengajuan cuti/saldo terkait disinkronkan.',
+                  holidaySuccessText(
+                      'Hari libur ditambahkan & pengajuan cuti/saldo terkait disinkronkan.',
+                  ),
               );
         if (ok) holidayModalOpen = false;
     }
@@ -1025,22 +1113,22 @@
                                         >
                                             Saldo
                                         </Button>
-                                        {#if u.role !== 'EMPLOYEE_SALES'}
-                                            <Button
-                                                size="sm"
-                                                variant="outline"
-                                                disabled={isSelf || busy}
-                                                class="h-7 cursor-pointer border-stone-300 px-2 text-[11px]"
-                                                onclick={() => {
-                                                    overrideTarget = u;
-                                                    ovDate = new Date().toISOString().slice(0, 10);
-                                                    ovDayOff = false;
-                                                    ovShiftId = activeShifts[0]?.id ?? '';
-                                                }}
-                                            >
-                                                <CalendarDays class="mr-1 size-3" /> Jadwal
-                                            </Button>
-                                        {/if}
+                                        <Button
+                                            size="sm"
+                                            variant="outline"
+                                            disabled={isSelf || busy}
+                                            class="h-7 cursor-pointer border-stone-300 px-2 text-[11px]"
+                                            onclick={() => {
+                                                overrideTarget = u;
+                                                ovDate = new Date().toISOString().slice(0, 10);
+                                                ovDayOff = false;
+                                                ovShiftId = activeShifts[0]?.id ?? '';
+                                                ovReplacementDate = '';
+                                                ovNotes = '';
+                                            }}
+                                        >
+                                            <CalendarDays class="mr-1 size-3" /> Jadwal
+                                        </Button>
                                     </div>
                                 </td>
                             </tr>
@@ -1519,13 +1607,25 @@
                         Tambah/ubah/hapus otomatis merekalkulasi pengajuan cuti/izin (&gt;= hari ini); Cuti Bersama hanya memotong saldo masa kerja &ge; 1 tahun.
                     </p>
                 </div>
-                <Button
-                    size="sm"
-                    class="h-8 cursor-pointer bg-[#6F3E1D] text-xs text-white hover:bg-[#583015]"
-                    onclick={() => openHolidayModal(null)}
-                >
-                    <Plus class="mr-1 size-3.5" /> Tambah Hari Libur
-                </Button>
+                <div class="flex flex-wrap items-center gap-2">
+                    <select
+                        value={effectiveHolidayYear}
+                        onchange={(e) => (holidayYearFilter = e.currentTarget.value)}
+                        class="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs"
+                    >
+                        <option value="">Semua Tahun</option>
+                        {#each holidayYears as year (year)}
+                            <option value={year}>{year}</option>
+                        {/each}
+                    </select>
+                    <Button
+                        size="sm"
+                        class="h-8 cursor-pointer bg-[#6F3E1D] text-xs text-white hover:bg-[#583015]"
+                        onclick={() => openHolidayModal(null)}
+                    >
+                        <Plus class="mr-1 size-3.5" /> Tambah Hari Libur
+                    </Button>
+                </div>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full text-left text-[13px]">
@@ -1539,10 +1639,21 @@
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-stone-200">
-                        {#each holidays as h (h.id)}
+                        {#if filteredHolidays.length === 0}
+                            <tr>
+                                <td colspan="5" class="px-2.5 py-6 text-center text-xs text-stone-500">
+                                    Tidak ada hari libur tercatat untuk filter tahun ini.
+                                </td>
+                            </tr>
+                        {/if}
+                        {#each filteredHolidays as h (h.id)}
                             <tr class="hover:bg-stone-50">
                                 <td class="px-2.5 py-2 font-mono text-xs">{h.holiday_date.slice(0, 10)}</td>
-                                <td class="px-2.5 py-2 font-mono text-xs">{h.holiday_type}</td>
+                                <td class="px-2.5 py-2">
+                                    <span class={holidayTypeBadge(h.holiday_type)}>
+                                        {holidayTypeLabel(h.holiday_type)}
+                                    </span>
+                                </td>
                                 <td class="px-2.5 py-2 text-xs">{h.location?.name ?? 'Semua Cabang'}</td>
                                 <td class="px-2.5 py-2">{h.description}</td>
                                 <td class="px-2.5 py-2">
@@ -1756,6 +1867,16 @@
                     <span>Pending: {curBal.pending_days}</span>
                     <span>Adj: {curBal.adjustment_days}</span>
                 </div>
+                {#if balancePreview !== null}
+                    <p class="mt-1 text-[11px] font-medium">
+                        Sisa setelah penyesuaian: <span class="font-mono">{balancePreview.toFixed(1)}</span> Hari
+                    </p>
+                {/if}
+                {#if Number(balYear) !== currentYear}
+                    <p class="mt-1 text-[11px] text-yellow-800">
+                        Rincian di atas adalah saldo tahun {currentYear}; tahun {balYear} dihitung ulang setelah disimpan.
+                    </p>
+                {/if}
             {/if}
             <div class="mt-3 space-y-2 text-xs">
                 <label class="block">
@@ -1809,6 +1930,21 @@
                     <input type="checkbox" bind:checked={ovDayOff} />
                     <span>Tandai sebagai Hari Libur (OFF)</span>
                 </label>
+                {#if ovDayOff}
+                    {#if overrideTarget.role === 'EMPLOYEE_OFFICE' || overrideTarget.role === 'EMPLOYEE_SALES'}
+                        <label class="block">
+                            <span class="mb-1 block font-medium">Tanggal Asal Ganti Hari (opsional)</span>
+                            <Input bind:value={ovReplacementDate} type="date" class="h-8 text-xs" />
+                            <span class="mt-1 block text-[11px] text-stone-500">
+                                Pilih tanggal libur dengan absen/kunjungan OFF_DAY_ATTENDANCE yang sah.
+                            </span>
+                        </label>
+                    {/if}
+                    <label class="block">
+                        <span class="mb-1 block font-medium">Catatan / Alasan</span>
+                        <Input bind:value={ovNotes} placeholder="Wajib untuk ganti hari" class="h-8 text-xs" />
+                    </label>
+                {/if}
                 {#if !ovDayOff}
                     <label class="block">
                         <span class="mb-1 block font-medium">Shift</span>
@@ -1835,6 +1971,8 @@
                                 work_date: ovDate,
                                 is_day_off: ovDayOff,
                                 shift_id: ovDayOff || ovShiftId === '' ? null : Number(ovShiftId),
+                                replacement_for_date: ovDayOff && ovReplacementDate !== '' ? ovReplacementDate : null,
+                                notes: ovNotes.trim() || null,
                             },
                             `Jadwal ${overrideTarget.nik} pada ${ovDate} diperbarui.`,
                         );
@@ -1854,7 +1992,7 @@
         <div class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
             <h3 class="text-sm font-semibold">Impor CSV Saldo Awal Cuti</h3>
             <p class="mt-1 text-xs text-stone-600">
-                Format: `nik,adjustment_days` (opsional `,base_quota,prorated_deduction`). Transaksi atomik all-or-nothing, `used_days` &amp; `pending_days` tetap utuh.
+                Format: `nik,adjustment_days` (kelipatan 0.5). Transaksi atomik all-or-nothing; NIK duplikat ditolak; `used_days` &amp; `pending_days` tetap utuh.
             </p>
             <div class="mt-3 space-y-2 text-xs">
                 <div class="flex items-center gap-2">
@@ -1863,6 +2001,13 @@
                         <Input bind:value={csvBalanceYear} type="number" class="h-8 w-28 text-xs" />
                     </label>
                     <input type="file" accept=".csv,text/csv" onchange={(e) => readCsvFile(e, (t) => (csvBalanceText = t))} />
+                    <a
+                        class="ml-auto font-medium text-[#6F3E1D] underline"
+                        href="data:text/csv;charset=utf-8,nik%2Cadjustment_days%0AOFF001%2C2%0ASLS001%2C-1.5"
+                        download="template-saldo-cuti.csv"
+                    >
+                        Unduh Template
+                    </a>
                 </div>
                 <textarea bind:value={csvBalanceText} rows="4" class="w-full rounded-md border border-stone-300 p-2 font-mono text-xs"></textarea>
                 <div class="max-h-44 overflow-y-auto rounded border border-stone-200">
@@ -1886,6 +2031,10 @@
                                             <span class="text-red-700">Formula berbahaya!</span>
                                         {:else if row.invalidAdj}
                                             <span class="text-red-700">Angka di luar -30..30</span>
+                                        {:else if row.invalidStep}
+                                            <span class="text-red-700">Harus kelipatan 0.5</span>
+                                        {:else if row.duplicateNik}
+                                            <span class="text-red-700">NIK duplikat</span>
                                         {:else if row.notFound}
                                             <span class="text-red-700">NIK tidak ditemukan</span>
                                         {:else if row.isSelf}
@@ -1915,8 +2064,6 @@
                                 rows: csvBalanceRows.map((r) => ({
                                     nik: r.nik,
                                     adjustment_days: r.adjustment_days,
-                                    base_quota: r.base_quota,
-                                    prorated_deduction: r.prorated_deduction,
                                 })),
                             },
                             'Saldo cuti CSV berhasil diimpor.',
@@ -2026,6 +2173,20 @@
                     <span class="mb-1 block font-medium">Alamat</span>
                     <Input bind:value={lAddress} class="h-8 text-xs" />
                 </label>
+                <div class="flex items-center justify-between md:col-span-2">
+                    <span class="font-medium text-stone-700">Koordinat Lokasi</span>
+                    <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={locGpsBusy}
+                        class="h-7 border-stone-300 px-2 text-[11px]"
+                        onclick={fillCurrentGpsForLocation}
+                    >
+                        <MapPin class="mr-1 size-3" />
+                        {locGpsBusy ? 'Mengambil GPS...' : 'Ambil GPS Saat Ini'}
+                    </Button>
+                </div>
                 <label class="block">
                     <span class="mb-1 block font-medium">Latitude</span>
                     <Input bind:value={lLat} type="number" step="0.000001" class="h-8 text-xs font-mono" />
@@ -2260,7 +2421,9 @@
                             `/admin/holidays/${deleteHolidayTarget.id}`,
                             'DELETE',
                             {},
-                            'Hari libur dihapus & saldo/cuti disinkronkan.',
+                            holidaySuccessText(
+                                'Hari libur dihapus & saldo/cuti disinkronkan.',
+                            ),
                         );
                         if (ok) deleteHolidayTarget = null;
                     }}

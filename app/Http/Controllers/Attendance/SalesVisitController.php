@@ -16,6 +16,7 @@ use App\Services\AntiFraudService;
 use App\Services\AttendanceHelperService;
 use App\Services\GeoLocationService;
 use App\Services\ImageEvidenceService;
+use App\Services\LeaveBalanceService;
 use App\Services\ScheduleResolverService;
 use App\Services\TokenGuardService;
 use Carbon\CarbonImmutable;
@@ -38,6 +39,7 @@ class SalesVisitController extends Controller
         private readonly TokenGuardService $tokenGuard,
         private readonly ImageEvidenceService $imageEvidence,
         private readonly AttendanceHelperService $helper,
+        private readonly LeaveBalanceService $balanceService,
     ) {}
 
     public function index(Request $request): Response
@@ -89,7 +91,7 @@ class SalesVisitController extends Controller
             ->orderBy('name')
             ->get(['id', 'name', 'exempt_short_duration']);
 
-        return Inertia::render('attendance/Sales', [
+        return Inertia::render('sales/Kunjungan', [
             'homeTimezone' => $homeOffice->timezone,
             'todayDate' => $todayBranch,
             'hasApprovedTimeOff' => $this->scheduleResolver->hasApprovedTimeOff($user->id, $todayBranch),
@@ -280,6 +282,7 @@ class SalesVisitController extends Controller
         $homeOffice = $user->officeLocation;
         $nowUtc = CarbonImmutable::now('UTC');
         $visitDate = $nowUtc->setTimezone($homeOffice->timezone)->toDateString();
+        $isEffectiveWorkDay = $this->balanceService->isEffectiveWorkDay($user, $visitDate);
 
         if ($this->scheduleResolver->hasApprovedTimeOff($user->id, $visitDate)) {
             throw ValidationException::withMessages([
@@ -345,6 +348,9 @@ class SalesVisitController extends Controller
         );
 
         $flags = [...$geoEval['flags'], ...$fraud['flags']];
+        if (! $isEffectiveWorkDay) {
+            $flags[] = 'OFF_DAY_ATTENDANCE';
+        }
         if ($isUnverifiedOutlet) {
             $flags[] = 'UNVERIFIED_OUTLET';
         }
@@ -565,6 +571,10 @@ class SalesVisitController extends Controller
 
         $existingFlags = $visit->anomaly_flags ?? [];
         $outFlags = [...$existingFlags, ...$geoEval['flags'], ...$fraud['flags']];
+
+        if (! $this->balanceService->isEffectiveWorkDay($user, $visitDate)) {
+            $outFlags[] = 'OFF_DAY_ATTENDANCE';
+        }
 
         if ($durationMinutes < 3 && ! $category->exempt_short_duration) {
             $outFlags[] = 'SHORT_DURATION';

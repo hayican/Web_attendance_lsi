@@ -88,17 +88,18 @@ class ScheduleResolverService
             ->exists();
     }
 
-    public function approvedDinasLuar(int $userId, string $workDate): ?LeaveRequest
+    public function dinasLuarForDate(int $userId, string $workDate): ?LeaveRequest
     {
         /** @var LeaveRequest|null $leave */
         $leave = LeaveRequest::query()
             ->where('user_id', $userId)
             ->where('type', LeaveType::DINAS_LUAR)
-            ->whereIn('status', [LeaveStatus::APPROVED, LeaveStatus::PARTIALLY_CANCELLED])
+            ->whereIn('status', [LeaveStatus::APPROVED, LeaveStatus::PARTIALLY_CANCELLED, LeaveStatus::PENDING])
             ->whereHas('days', function ($query) use ($workDate): void {
                 $query->whereDate('leave_date', $workDate)
-                    ->where('status', LeaveDayStatus::APPROVED);
+                    ->whereIn('status', [LeaveDayStatus::APPROVED, LeaveDayStatus::PENDING]);
             })
+            ->orderByRaw('CASE WHEN status = ? THEN 1 ELSE 0 END', [LeaveStatus::PENDING->value])
             ->first();
 
         return $leave;

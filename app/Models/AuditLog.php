@@ -6,7 +6,13 @@ use App\Enums\AuditAction;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use RuntimeException;
 
+/**
+ * @property int $id
+ * @property string|null $prev_hash
+ * @property string|null $row_hash
+ */
 #[Fillable([
     'actor_id',
     'entity',
@@ -15,11 +21,24 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'old_values',
     'new_values',
     'reason',
+    'prev_hash',
+    'row_hash',
     'created_at',
 ])]
 class AuditLog extends Model
 {
     public $timestamps = false;
+
+    protected static function booted(): void
+    {
+        static::updating(static function (): void {
+            throw new RuntimeException('audit_logs is append-only');
+        });
+
+        static::deleting(static function (): void {
+            throw new RuntimeException('audit_logs is append-only');
+        });
+    }
 
     /**
      * @return array<string, string>

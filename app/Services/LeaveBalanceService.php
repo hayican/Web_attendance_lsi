@@ -6,10 +6,13 @@ use App\Enums\HolidayType;
 use App\Enums\LeaveDayStatus;
 use App\Enums\LeaveStatus;
 use App\Enums\LeaveType;
+use App\Enums\ScheduleSource;
+use App\Enums\UserRole;
 use App\Models\Holiday;
 use App\Models\LeaveBalance;
 use App\Models\LeaveRequest;
 use App\Models\User;
+use App\Models\UserShiftSchedule;
 use Carbon\CarbonImmutable;
 
 class LeaveBalanceService
@@ -172,20 +175,38 @@ class LeaveBalanceService
 
     public function isEffectiveWorkDay(User $user, string $date): bool
     {
-        if ($this->scheduleResolver->isHoliday($date, $user->office_location_id)) {
+        $isHoliday = $this->scheduleResolver->isHoliday($date, $user->office_location_id);
+        $schedule = $user->role === UserRole::EMPLOYEE_SALES
+            ? $user->shiftSchedules()->whereDate('work_date', $date)->first()
+            : $this->scheduleResolver->resolveOrCreateSchedule($user, $date);
+
+        return $this->isEffectiveWorkDayFrom($user, $date, $isHoliday, $schedule);
+    }
+
+    public function isEffectiveWorkDayFrom(
+        User $user,
+        string $date,
+        bool $isHoliday,
+        ?UserShiftSchedule $schedule,
+    ): bool {
+        if ($isHoliday) {
             return false;
         }
 
-        if ($user->default_shift_pattern_id !== null) {
-            $schedule = $user->shiftSchedules()->whereDate('work_date', $date)->first();
+        $dayIso = CarbonImmutable::parse($date)->dayOfWeekIso;
+        $workDays = $user->officeLocation->work_days;
 
-            return $schedule !== null && ! $schedule->is_day_off;
+        if ($user->role === UserRole::EMPLOYEE_SALES) {
+            $manualDayOff = $schedule !== null
+                && $schedule->is_day_off
+                && $schedule->source === ScheduleSource::MANUAL_OVERRIDE;
+
+            return ! $manualDayOff && in_array($dayIso, $workDays, true);
         }
 
-        $workDays = $user->officeLocation->work_days;
-        $dayIso = CarbonImmutable::parse($date)->dayOfWeekIso;
-
-        return in_array($dayIso, $workDays, true);
+        return $schedule !== null
+            ? ! $schedule->is_day_off
+            : in_array($dayIso, $workDays, true);
     }
 
     /**

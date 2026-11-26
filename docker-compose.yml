@@ -59,6 +59,7 @@ services:
         volumes:
             - mysql_data:/var/lib/mysql
             - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+            - ./docker/mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
         healthcheck:
             test:
                 [

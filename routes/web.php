@@ -59,6 +59,8 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
 
     Route::middleware('role:HR_ADMIN')->prefix('admin')->name('admin.')->group(function () {
         Route::get('dashboard', [HrDashboardController::class, 'index'])->name('dashboard');
+        Route::get('absen-saya', [OfficeAttendanceController::class, 'adminIndex'])->name('absen-saya');
+        Route::get('pengajuan-saya', [LeaveController::class, 'adminIndex'])->name('pengajuan-saya');
         Route::post('attendance/{attendanceLog}/review', [HrDashboardController::class, 'reviewAttendance'])->name('attendance.review');
         Route::post('attendance/{attendanceLog}/correct', [HrDashboardController::class, 'correctAttendanceStatus'])->name('attendance.correct');
         Route::post('visits/{salesVisit}/review', [HrDashboardController::class, 'reviewVisit'])->name('visits.review');
@@ -108,8 +110,9 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
 
         Route::get('talenta-mapping', [MasterDataController::class, 'talentaMappingIndex'])->name('talenta-mapping.index');
         Route::patch('talenta-mapping/{talentaMapping}', [MasterDataController::class, 'updateTalentaMapping'])->name('talenta-mapping.update');
-        Route::get('audit-logs', [MasterDataController::class, 'auditLogsIndex'])->name('audit-logs.index');
     });
+
+    Route::get('admin/audit-logs', [MasterDataController::class, 'auditLogsIndex'])->name('admin.audit-logs.index');
 
     Route::post('api/tokens/gps', [TokenController::class, 'issueGps'])->name('tokens.gps');
     Route::post('api/tokens/camera', [TokenController::class, 'issueCamera'])->name('tokens.camera');
