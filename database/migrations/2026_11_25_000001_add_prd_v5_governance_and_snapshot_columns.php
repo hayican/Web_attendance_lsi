@@ -38,6 +38,8 @@ return new class extends Migration
             $table->string('row_hash', 64)->nullable();
         });
 
+        // MySQL rejects trigger creation when binary logging is enabled
+        // unless the user has SUPER or log_bin_trust_function_creators=1.
         if (DB::connection()->getDriverName() === 'mysql') {
             DB::unprepared('DROP TRIGGER IF EXISTS `'.self::UPDATE_TRIGGER.'`');
             DB::unprepared('DROP TRIGGER IF EXISTS `'.self::DELETE_TRIGGER.'`');

@@ -18,6 +18,7 @@ jobs:
         image: mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: root_secret
+          MYSQL_ROOT_HOST: '%'
           MYSQL_DATABASE: attendance_lsi
           MYSQL_USER: lsi_user
           MYSQL_PASSWORD: lsi_secret
@@ -62,6 +63,10 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
+
+      - name: Allow MySQL triggers
+        run: |
+          php -r '$pdo = new PDO("mysql:host=127.0.0.1;port=3306;dbname=attendance_lsi", "root", "root_secret", [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]); $pdo->exec("SET GLOBAL log_bin_trust_function_creators = 1");'
 
       - name: Setup Application
         run: composer setup
