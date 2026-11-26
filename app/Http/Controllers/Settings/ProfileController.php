@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers\Settings;
 
+use App\Enums\UserRole;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Settings\ProfileDeleteRequest;
 use App\Http\Requests\Settings\ProfileUpdateRequest;
+use App\Models\User;
+use App\Services\ImageEvidenceService;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -14,14 +17,28 @@ use Inertia\Response;
 
 class ProfileController extends Controller
 {
+    public function __construct(private readonly ImageEvidenceService $imageEvidence) {}
+
     /**
      * Show the user's profile settings page.
      */
     public function edit(Request $request): Response
     {
-        return Inertia::render('settings/Profile', [
-            'mustVerifyEmail' => $request->user() instanceof MustVerifyEmail,
+        /** @var User $user */
+        $user = $request->user();
+
+        $component = match ($user->role) {
+            UserRole::EMPLOYEE_SALES => 'sales/Profil',
+            UserRole::HR_ADMIN => 'admin/Profil',
+            default => 'office/Profil',
+        };
+
+        return Inertia::render($component, [
+            'mustVerifyEmail' => $user instanceof MustVerifyEmail,
             'status' => $request->session()->get('status'),
+            'profilePhotoUrl' => $user->reference_photo_url !== null
+                ? $this->imageEvidence->signedUrl($user->reference_photo_url)
+                : null,
         ]);
     }
 

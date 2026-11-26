@@ -20,6 +20,8 @@
     import Download from '@lucide/svelte/icons/download';
     import FileCheck from '@lucide/svelte/icons/file-check';
     import History from '@lucide/svelte/icons/history';
+    import MapPin from '@lucide/svelte/icons/map-pin';
+    import RefreshCw from '@lucide/svelte/icons/refresh-cw';
     import ShieldAlert from '@lucide/svelte/icons/shield-alert';
     import Store from '@lucide/svelte/icons/store';
     import Users from '@lucide/svelte/icons/users';
@@ -28,7 +30,7 @@
     import VerificationMap from '@/components/VerificationMap.svelte';
     import { Button } from '@/components/ui/button';
     import { Input } from '@/components/ui/input';
-    import { readXsrfToken } from '@/lib/gpsClient';
+    import { readXsrfToken, requestFreshGps, type FreshGpsResult } from '@/lib/gpsClient';
 
     type QueueItem = {
         kind: 'attendance' | 'visit';
@@ -147,8 +149,19 @@
     let includeUnverifiedSales = $state(false);
     let correctTarget = $state<RecapRow | null>(null);
     let correctReason = $state('');
+    let gpsState = $state<FreshGpsResult | null>(null);
+    let gpsLoading = $state(false);
     let feedback = $state<string | null>(null);
     let busy = $state(false);
+
+    async function refreshAdminGps() {
+        gpsLoading = true;
+        try {
+            gpsState = await requestFreshGps(100);
+        } finally {
+            gpsLoading = false;
+        }
+    }
 
     $effect(() => {
         if (!filterDate) {
@@ -480,9 +493,31 @@
             <h1 class="text-lg font-semibold tracking-tight text-white md:text-xl">
                 Dashboard Kehadiran HR
             </h1>
-            <p class="font-mono text-xs text-stone-200">
-                Periode: {selectedDate}
-            </p>
+            <div class="mt-0.5 flex flex-wrap items-center gap-2 font-mono text-xs text-stone-200">
+                <span>Periode: {selectedDate}</span>
+                <span class="inline-flex items-center gap-1 rounded bg-white/15 px-2 py-0.5 text-[11px] text-white">
+                    <MapPin class="size-3" />
+                    {#if gpsLoading}
+                        Mengambil GPS...
+                    {:else if gpsState?.lat !== null && gpsState?.lng !== null && gpsState}
+                        {gpsState.lat.toFixed(5)}, {gpsState.lng.toFixed(5)} (±{Math.round(gpsState.accuracyM ?? 0)}m)
+                    {:else}
+                        {gpsState?.message ?? 'GPS belum aktif'}
+                    {/if}
+                    <button
+                        type="button"
+                        title="Muat ulang GPS"
+                        class="ml-0.5 cursor-pointer hover:text-amber-200"
+                        disabled={gpsLoading}
+                        onclick={refreshAdminGps}
+                    >
+                        <RefreshCw class="size-3 {gpsLoading ? 'animate-spin' : ''}" />
+                    </button>
+                </span>
+                <Link href="/admin/absen-saya" class="rounded bg-white/15 px-2 py-0.5 text-[11px] text-white underline hover:bg-white/25">
+                    Absen Saya
+                </Link>
+            </div>
         </div>
 
                 <div class="flex flex-wrap items-center gap-2">

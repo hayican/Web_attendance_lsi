@@ -290,7 +290,7 @@
 
 <AppHead title="Kunjungan Sales" />
 
-<div class="mx-auto flex w-full max-w-md flex-col gap-4 p-4">
+<div class="flex flex-col gap-3">
     {#if inAppWarning}
         <div
             class="rounded-lg border border-amber-500/50 bg-amber-50 p-3 text-sm text-amber-900"

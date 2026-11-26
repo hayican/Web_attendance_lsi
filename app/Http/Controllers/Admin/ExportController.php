@@ -50,21 +50,29 @@ class ExportController extends Controller
                 ->whereDate('end_date', '>=', $start->toDateString())
                 ->count();
 
-            if ($pendingCount > 0) {
-                $pendingAttendanceCount = AttendanceLog::query()
-                    ->whereDate('work_date', '>=', $start->toDateString())
-                    ->whereDate('work_date', '<=', $end->toDateString())
-                    ->where(function ($query): void {
-                        $query->where('clock_in_status', VerificationStatus::PENDING_REVIEW)
-                            ->orWhere('clock_out_status', VerificationStatus::PENDING_REVIEW);
-                    })
-                    ->count();
+            $pendingAttendanceCount = AttendanceLog::query()
+                ->whereDate('work_date', '>=', $start->toDateString())
+                ->whereDate('work_date', '<=', $end->toDateString())
+                ->where(function ($query): void {
+                    $query->where('clock_in_status', VerificationStatus::PENDING_REVIEW)
+                        ->orWhere('clock_out_status', VerificationStatus::PENDING_REVIEW);
+                })
+                ->count();
+
+            if ($pendingCount > 0 || $pendingAttendanceCount > 0) {
+                $parts = [];
+                if ($pendingCount > 0) {
+                    $parts[] = "{$pendingCount} pengajuan Cuti/Izin/Sakit PENDING";
+                }
+                if ($pendingAttendanceCount > 0) {
+                    $parts[] = "{$pendingAttendanceCount} absensi PENDING_REVIEW";
+                }
 
                 return response()->json([
                     'requires_pending_confirmation' => true,
                     'pending_count' => $pendingCount,
                     'pending_attendance_count' => $pendingAttendanceCount,
-                    'message' => "Masih ada {$pendingCount} pengajuan Cuti/Izin/Sakit berstatus PENDING dan {$pendingAttendanceCount} absensi PENDING_REVIEW di periode ini. Hari tersebut akan diekspor sebagai Alpa / Belum Absen. Tetap export?",
+                    'message' => 'Masih ada '.implode(' dan ', $parts).' di periode ini. Data terkait akan diekspor sesuai status saat ini. Tetap export?',
                 ], 409);
             }
         }
@@ -384,7 +392,6 @@ class ExportController extends Controller
             ->whereIn('user_id', $userIds)
             ->whereDate('visit_date', '>=', $startDate)
             ->whereDate('visit_date', '<=', $endDate)
-            ->where('visit_status', '!=', VisitStatus::CANCELLED)
             ->orderBy('visit_in_at')
             ->get()
             ->groupBy(fn (SalesVisit $visit): string => $visit->user_id.'|'.$visit->visit_date->toDateString());
@@ -458,9 +465,11 @@ class ExportController extends Controller
                             $row[8] = $visit->visit_in_at?->setTimezone($visitTz)->format('H:i:s') ?? '-';
                             $row[9] = $visit->visit_out_at?->setTimezone($visitTz)->format('H:i:s') ?? '-';
                             $row[10] = $visit->duration_minutes !== null ? (string) $visit->duration_minutes : '';
-                            $row[11] = $visit->verification_status === VerificationStatus::REJECTED
-                                ? 'Alpa (Ditolak HR)'
-                                : 'Hadir';
+                            $row[11] = $visit->visit_status === VisitStatus::CANCELLED
+                                ? 'Dibatalkan'
+                                : ($visit->verification_status === VerificationStatus::REJECTED
+                                    ? 'Alpa (Ditolak HR)'
+                                    : 'Hadir');
                             $row[12] = $visit->visit_status->value.' / '.$visit->verification_status->value;
                             $row[13] = $reviewer !== null ? $reviewer->nik.' - '.$reviewer->name : '-';
                             $row[14] = $visit->reviewed_at?->setTimezone($visitTz)->format('Y-m-d H:i:s') ?? '-';

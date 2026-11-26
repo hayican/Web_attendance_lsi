@@ -14,6 +14,7 @@
     import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
     import CalendarDays from '@lucide/svelte/icons/calendar-days';
     import KeyRound from '@lucide/svelte/icons/key-round';
+    import MapPin from '@lucide/svelte/icons/map-pin';
     import Pencil from '@lucide/svelte/icons/pencil';
     import Plus from '@lucide/svelte/icons/plus';
     import RefreshCw from '@lucide/svelte/icons/refresh-cw';
@@ -24,7 +25,7 @@
     import AppHead from '@/components/AppHead.svelte';
     import { Button } from '@/components/ui/button';
     import { Input } from '@/components/ui/input';
-    import { readXsrfToken } from '@/lib/gpsClient';
+    import { readXsrfToken, requestFreshGps } from '@/lib/gpsClient';
 
     type LeaveBalanceItem = {
         year: number;
@@ -687,6 +688,23 @@
         lTimezone = loc?.timezone ?? 'Asia/Jakarta';
         lWorkDays = loc?.work_days ? [...loc.work_days] : [1, 2, 3, 4, 5, 6];
         locModalOpen = true;
+    }
+
+    let locGpsBusy = $state(false);
+
+    async function fillCurrentGpsForLocation() {
+        locGpsBusy = true;
+        try {
+            const res = await requestFreshGps(Number(lRadius) || 100);
+            if (res.lat !== null && res.lng !== null) {
+                lLat = Number(res.lat.toFixed(6));
+                lLng = Number(res.lng.toFixed(6));
+            } else if (res.message) {
+                alert(res.message);
+            }
+        } finally {
+            locGpsBusy = false;
+        }
     }
 
     function toggleWorkDay(day: number) {
@@ -2155,6 +2173,20 @@
                     <span class="mb-1 block font-medium">Alamat</span>
                     <Input bind:value={lAddress} class="h-8 text-xs" />
                 </label>
+                <div class="flex items-center justify-between md:col-span-2">
+                    <span class="font-medium text-stone-700">Koordinat Lokasi</span>
+                    <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={locGpsBusy}
+                        class="h-7 border-stone-300 px-2 text-[11px]"
+                        onclick={fillCurrentGpsForLocation}
+                    >
+                        <MapPin class="mr-1 size-3" />
+                        {locGpsBusy ? 'Mengambil GPS...' : 'Ambil GPS Saat Ini'}
+                    </Button>
+                </div>
                 <label class="block">
                     <span class="mb-1 block font-medium">Latitude</span>
                     <Input bind:value={lLat} type="number" step="0.000001" class="h-8 text-xs font-mono" />

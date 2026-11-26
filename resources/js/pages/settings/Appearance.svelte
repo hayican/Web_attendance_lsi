@@ -17,15 +17,15 @@
     import Heading from '@/components/Heading.svelte';
 </script>
 
-<AppHead title="Appearance settings" />
+<AppHead title="Tampilan" />
 
-<h1 class="sr-only">Appearance settings</h1>
+<h1 class="sr-only">Tampilan</h1>
 
 <div class="space-y-6">
     <Heading
         variant="small"
-        title="Appearance settings"
-        description="Update the appearance settings for your account"
+        title="Tampilan"
+        description="Pilih mode tampilan akun Anda."
     />
     <AppearanceTabs />
 </div>

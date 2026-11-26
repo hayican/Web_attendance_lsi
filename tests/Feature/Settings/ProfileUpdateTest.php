@@ -1,6 +1,9 @@
 <?php
 
+use App\Enums\UserRole;
+use App\Models\Location;
 use App\Models\User;
+use Inertia\Testing\AssertableInertia;
 
 test('profile page is displayed', function () {
     $user = User::factory()->create();
@@ -9,7 +12,26 @@ test('profile page is displayed', function () {
         ->actingAs($user)
         ->get(route('profile.edit'));
 
-    $response->assertOk();
+    $response->assertOk()->assertInertia(fn (AssertableInertia $page) => $page
+        ->component('office/Profil')
+        ->where('office.name', $user->officeLocation->name)
+        ->where('profilePhotoUrl', null)
+    );
+});
+
+test('hr profile uses admin-specific page component', function () {
+    $office = Location::factory()->create();
+    $hr = User::factory()->create([
+        'role' => UserRole::HR_ADMIN,
+        'office_location_id' => $office->id,
+    ]);
+
+    $this->actingAs($hr)
+        ->get(route('profile.edit'))
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/Profil')
+        );
 });
 
 test('profile information can be updated', function () {

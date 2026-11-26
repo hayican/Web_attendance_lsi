@@ -17,6 +17,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Inertia\Testing\AssertableInertia;
 
 test('outlet search hides exact coordinates and sorts by nearest distance', function () {
     $office = Location::factory()->create(['type' => LocationType::OFFICE]);
@@ -48,6 +49,25 @@ test('outlet search hides exact coordinates and sorts by nearest distance', func
     expect($outlets[0]['name'])->toBe('Toko Dekat')
         ->and($outlets[0])->not->toHaveKey('latitude')
         ->and($outlets[0])->not->toHaveKey('longitude');
+});
+
+test('sales visit page uses sales-specific component', function () {
+    $office = Location::factory()->create([
+        'type' => LocationType::OFFICE,
+        'timezone' => 'Asia/Jakarta',
+    ]);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $this->actingAs($sales)
+        ->get('/attendance/sales')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('sales/Kunjungan')
+        );
 });
 
 test('sales NOO requires <= 50m GPS accuracy and enforces duplicate warning', function () {

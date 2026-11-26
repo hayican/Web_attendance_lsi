@@ -9,6 +9,7 @@ use App\Enums\UserRole;
 use App\Models\Holiday;
 use App\Models\LeaveBalance;
 use App\Models\LeaveRequest;
+use App\Models\LeaveRequestDay;
 use App\Models\Location;
 use App\Models\Shift;
 use App\Models\ShiftPattern;
@@ -20,6 +21,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Inertia\Testing\AssertableInertia;
 
 function makePatternedUser(string $joinDate, UserRole $role = UserRole::EMPLOYEE_OFFICE): User
 {
@@ -321,4 +323,81 @@ test('dinas luar scheduled start cannot pass the shift end on an effective day',
     ])->assertUnprocessable()->assertJsonValidationErrors('scheduled_start_time');
 
     CarbonImmutable::setTestNow();
+});
+
+test('leave page exposes calendar context and monthly cuti usage', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 09:00:00', 'Asia/Jakarta'));
+
+    $user = makePatternedUser('2024-01-01');
+    app(ShiftScheduleGeneratorService::class)->generateForUser(
+        $user,
+        CarbonImmutable::parse('2026-11-18', 'Asia/Jakarta'),
+        95,
+    );
+
+    $leave = LeaveRequest::query()->create([
+        'user_id' => $user->id,
+        'type' => LeaveType::CUTI,
+        'start_date' => '2026-11-20',
+        'end_date' => '2026-11-20',
+        'total_days' => 1.0,
+        'reason' => 'Keperluan keluarga',
+        'status' => LeaveStatus::APPROVED,
+    ]);
+
+    LeaveRequestDay::query()->create([
+        'leave_request_id' => $leave->id,
+        'user_id' => $user->id,
+        'leave_date' => '2026-11-20',
+        'day_value' => 1.0,
+        'status' => LeaveDayStatus::APPROVED,
+    ]);
+
+    $this->actingAs($user)
+        ->get('/leave')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('office/Pengajuan')
+            ->where('calendar.requires_published_schedule', true)
+            ->where('calendar.max_date', '2027-02-21')
+            ->where('calendar.min_start_dates.CUTI', '2026-11-26')
+            ->where('cutiDaysByMonth.2026-11', 1)
+            ->where('calendar.work_dates', fn ($dates): bool => collect($dates)->contains('2026-11-24'))
+        );
+
+    CarbonImmutable::setTestNow();
+});
+
+test('leave page uses sales-specific page component for sales', function () {
+    $office = Location::factory()->create();
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $this->actingAs($sales)
+        ->get('/leave')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('sales/Pengajuan')
+        );
+});
+
+test('hr leave has separate mobile and desktop page components', function () {
+    $hr = makePatternedUser('2024-01-01', UserRole::HR_ADMIN);
+
+    $this->actingAs($hr)
+        ->get('/leave')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/PengajuanSayaMobile')
+        );
+
+    $this->actingAs($hr)
+        ->get('/admin/pengajuan-saya')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/PengajuanSaya')
+        );
 });

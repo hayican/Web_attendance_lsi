@@ -21,6 +21,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Inertia\Testing\AssertableInertia;
 
 function setupOfficeUser(string $timezone = 'Asia/Jakarta', string $start = '08:00:00', string $end = '16:00:00'): array
 {
@@ -467,4 +468,86 @@ test('office clock-in on a holiday adds OFF_DAY_ATTENDANCE', function () {
     expect($res->json('attendance.clock_in_anomaly_flags'))->toContain('OFF_DAY_ATTENDANCE');
 
     CarbonImmutable::setTestNow();
+});
+
+test('office page exposes ui summary without leaking device credentials', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 08:05:00', 'Asia/Jakarta'));
+
+    [$user, $location, $shift] = setupOfficeUser();
+
+    AttendanceLog::query()->create([
+        'user_id' => $user->id,
+        'location_id' => $location->id,
+        'shift_id' => $shift->id,
+        'source' => AttendanceSource::APP,
+        'work_date' => '2026-11-23',
+        'attempt_no' => 1,
+        'is_active_attempt' => 1,
+        'clock_in_at' => CarbonImmutable::parse('2026-11-23 08:00:00', 'Asia/Jakarta')->utc(),
+        'clock_in_photo_url' => 'evidence/secret.jpg',
+        'clock_in_lat' => -6.2000000,
+        'clock_in_lng' => 106.8166667,
+        'clock_in_accuracy_m' => 150,
+        'clock_in_device_id' => 'device-secret',
+        'clock_in_ip' => '10.10.10.10',
+        'clock_in_user_agent' => 'secret-agent',
+        'clock_in_idempotency_key' => (string) Str::uuid(),
+        'clock_in_status' => VerificationStatus::PENDING_REVIEW,
+        'clock_in_anomaly_flags' => ['LOW_ACCURACY'],
+    ]);
+
+    $this->actingAs($user)
+        ->get('/attendance/office')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('office/Absen')
+            ->where('office.latitude', -6.2)
+            ->where('office.longitude', 106.8166667)
+            ->where('office.radius_m', 50)
+            ->where('effectiveStartIso', '2026-11-23T08:00:00+07:00')
+            ->where('effectiveEndIso', '2026-11-23T16:00:00+07:00')
+            ->where('closeDeadlineIso', '2026-11-23T21:00:00+07:00')
+            ->where('activeLog.attempt_no', 1)
+            ->where('activeLog.clock_in_status', VerificationStatus::PENDING_REVIEW->value)
+            ->where('activeLog.clock_in_anomaly_flags', ['LOW_ACCURACY'])
+            ->missing('activeLog.clock_in_device_id')
+            ->missing('activeLog.clock_in_ip')
+            ->missing('activeLog.clock_in_user_agent')
+            ->missing('activeLog.clock_in_idempotency_key')
+            ->missing('activeLog.clock_in_photo_url')
+        );
+
+    CarbonImmutable::setTestNow();
+});
+
+test('hr attendance uses admin-specific page component', function () {
+    $location = Location::factory()->create(['timezone' => 'Asia/Jakarta']);
+    $hr = User::factory()->create([
+        'role' => UserRole::HR_ADMIN,
+        'office_location_id' => $location->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $this->actingAs($hr)
+        ->get('/attendance/office')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/AbsenSayaMobile')
+        );
+});
+
+test('hr admin has a desktop attendance page', function () {
+    $location = Location::factory()->create(['timezone' => 'Asia/Jakarta']);
+    $hr = User::factory()->create([
+        'role' => UserRole::HR_ADMIN,
+        'office_location_id' => $location->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $this->actingAs($hr)
+        ->get('/admin/absen-saya')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/AbsenSaya')
+        );
 });

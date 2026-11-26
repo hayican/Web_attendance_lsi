@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Attendance;
 
 use App\Enums\AttendanceSource;
+use App\Enums\UserRole;
 use App\Enums\VerificationStatus;
 use App\Http\Controllers\Controller;
 use App\Models\AttendanceLog;
@@ -41,6 +42,24 @@ class OfficeAttendanceController extends Controller
     {
         /** @var User $user */
         $user = $request->user();
+
+        $component = $user->role === UserRole::HR_ADMIN
+            ? 'admin/AbsenSayaMobile'
+            : 'office/Absen';
+
+        return $this->renderAttendancePage($user, $component);
+    }
+
+    public function adminIndex(Request $request): Response
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        return $this->renderAttendancePage($user, 'admin/AbsenSaya');
+    }
+
+    private function renderAttendancePage(User $user, string $component): Response
+    {
         $user->load(['officeLocation', 'defaultShiftPattern']);
 
         /** @var Location $office */
@@ -57,7 +76,6 @@ class OfficeAttendanceController extends Controller
         $dinasLuar = $this->scheduleResolver->dinasLuarForDate($user->id, $workDate);
 
         $activeLog = AttendanceLog::query()
-            ->with(['location', 'shift'])
             ->where('user_id', $user->id)
             ->whereDate('work_date', $workDate)
             ->where('is_active_attempt', 1)
@@ -73,6 +91,7 @@ class OfficeAttendanceController extends Controller
                 ->first();
         }
 
+        $effectiveStart = $this->scheduleResolver->effectiveStartTime($workDate, $timezone, $shift, $dinasLuar);
         $effectiveEnd = $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
         $autoCloseHours = $shift !== null ? $shift->auto_close_hours : 5;
         $closeDeadline = $effectiveEnd !== null
@@ -83,12 +102,14 @@ class OfficeAttendanceController extends Controller
             && $rejectedLog->clock_out_at === null
             && $nowLocal->lessThan($closeDeadline);
 
-        return Inertia::render('attendance/Office', [
+        return Inertia::render($component, [
             'office' => [
                 'id' => $office->id,
                 'name' => $office->name,
                 'radius_m' => $office->radius_m,
                 'timezone' => $timezone,
+                'latitude' => (float) $office->latitude,
+                'longitude' => (float) $office->longitude,
             ],
             'serverTimeIso' => $nowUtc->toIso8601String(),
             'workDate' => $workDate,
@@ -107,10 +128,39 @@ class OfficeAttendanceController extends Controller
                 'scheduled_start_time' => $dinasLuar->scheduled_start_time,
                 'status' => $dinasLuar->status->value,
             ] : null,
-            'activeLog' => $activeLog,
-            'rejectedLog' => $rejectedLog,
+            'effectiveStartIso' => $effectiveStart?->toIso8601String(),
+            'effectiveEndIso' => $effectiveEnd?->toIso8601String(),
+            'closeDeadlineIso' => $closeDeadline->toIso8601String(),
+            'activeLog' => $activeLog !== null ? $this->summarizeAttendanceLog($activeLog) : null,
+            'rejectedLog' => $rejectedLog !== null ? $this->summarizeAttendanceLog($rejectedLog) : null,
             'canRetryRejected' => $canRetryRejected,
         ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function summarizeAttendanceLog(AttendanceLog $log): array
+    {
+        return [
+            'id' => $log->id,
+            'attempt_no' => $log->attempt_no,
+            'clock_in_at' => $log->clock_in_at?->toIso8601String(),
+            'clock_out_at' => $log->clock_out_at?->toIso8601String(),
+            'clock_in_status' => $log->clock_in_status->value,
+            'clock_out_status' => $log->clock_out_status?->value,
+            'clock_in_anomaly_flags' => $log->clock_in_anomaly_flags ?? [],
+            'clock_out_anomaly_flags' => $log->clock_out_anomaly_flags ?? [],
+            'clock_in_reject_reason' => $log->clock_in_reject_reason,
+            'clock_out_reject_reason' => $log->clock_out_reject_reason,
+            'clock_in_notes' => $log->clock_in_notes,
+            'clock_out_notes' => $log->clock_out_notes,
+            'late_minutes' => $log->late_minutes,
+            'early_leave_minutes' => $log->early_leave_minutes,
+            'schedule_start_time' => $log->schedule_start_time,
+            'schedule_end_time' => $log->schedule_end_time,
+            'auto_close_hours' => $log->auto_close_hours,
+        ];
     }
 
     public function clockIn(Request $request): JsonResponse

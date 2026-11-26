@@ -567,6 +567,23 @@ test('audit export builds a calendar grid with status and verification columns',
         'office_location_id' => $office->id,
         'default_shift_pattern_id' => null,
     ]);
+    $sales = User::factory()->create([
+        'nik' => 'GRIDSLS',
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $outlet = Location::factory()->create(['type' => LocationType::OUTLET, 'timezone' => 'Asia/Jakarta']);
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'source' => AttendanceSource::APP,
+        'visit_date' => '2026-11-22',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-22 09:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::CANCELLED,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+        'cancel_reason' => 'Salah toko',
+    ]);
 
     $res = $this->actingAs($hr)
         ->get('/admin/exports/audit?start_date=2026-11-20&end_date=2026-11-22')
@@ -580,13 +597,17 @@ test('audit export builds a calendar grid with status and verification columns',
     $rows = collect(exportRows($content));
     $alpa = $rows->first(fn (array $row): bool => $row[0] === '2026-11-20' && $row[1] === 'GRID01');
     $libur = $rows->first(fn (array $row): bool => $row[0] === '2026-11-22' && $row[1] === 'GRID01');
+    $cancelled = $rows->first(fn (array $row): bool => $row[0] === '2026-11-22' && $row[1] === 'GRIDSLS');
 
     expect($alpa)->not->toBeNull()
         ->and($alpa[5])->toBe('Asia/Jakarta')
         ->and($alpa[10])->toBe('')
         ->and($alpa[11])->toBe('Alpa')
         ->and($libur)->not->toBeNull()
-        ->and($libur[11])->toBe('Libur');
+        ->and($libur[11])->toBe('Libur')
+        ->and($cancelled)->not->toBeNull()
+        ->and($cancelled[11])->toBe('Dibatalkan')
+        ->and($cancelled[16])->toBe('Salah toko');
 
     CarbonImmutable::setTestNow();
 });
@@ -696,4 +717,26 @@ test('approval queue flags HR leave that leaves fewer than two HR working', func
     expect($item['hr_conflict_warning'])->toBeTrue();
 
     CarbonImmutable::setTestNow();
+});
+
+test('talenta export warns when only attendance is pending review', function () {
+    $office = Location::factory()->create(['timezone' => 'Asia/Jakarta']);
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id]);
+
+    AttendanceLog::query()->create([
+        'user_id' => $hr->id,
+        'location_id' => $office->id,
+        'source' => AttendanceSource::APP,
+        'work_date' => '2026-11-23',
+        'attempt_no' => 1,
+        'is_active_attempt' => 1,
+        'clock_in_at' => CarbonImmutable::parse('2026-11-23 08:00:00', 'Asia/Jakarta')->utc(),
+        'clock_in_status' => VerificationStatus::PENDING_REVIEW,
+    ]);
+
+    $this->actingAs($hr)
+        ->getJson('/admin/exports/talenta-office?start_date=2026-11-23&end_date=2026-11-23')
+        ->assertStatus(409)
+        ->assertJsonPath('pending_count', 0)
+        ->assertJsonPath('pending_attendance_count', 1);
 });

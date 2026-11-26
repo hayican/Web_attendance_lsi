@@ -2,6 +2,7 @@
     import { Link } from '@inertiajs/svelte';
     import CalendarCheck from '@lucide/svelte/icons/calendar-check';
     import ClipboardList from '@lucide/svelte/icons/clipboard-list';
+    import Clock from '@lucide/svelte/icons/clock';
     import Database from '@lucide/svelte/icons/database';
     import FileCheck from '@lucide/svelte/icons/file-check';
     import History from '@lucide/svelte/icons/history';
@@ -47,8 +48,9 @@
         {
             title: 'Pribadi & Audit',
             items: [
-                { title: 'Absen Saya', href: '/attendance/office', icon: MapPin },
-                { title: 'Cuti Saya', href: '/leave', icon: ClipboardList },
+                { title: 'Absen Saya', href: '/admin/absen-saya', icon: MapPin },
+                { title: 'Riwayat Absensi', href: '/attendance/history', icon: Clock },
+                { title: 'Pengajuan Saya', href: '/admin/pengajuan-saya', icon: ClipboardList },
                 { title: 'Riwayat Audit', href: '/admin/audit-logs', icon: History },
             ],
         },

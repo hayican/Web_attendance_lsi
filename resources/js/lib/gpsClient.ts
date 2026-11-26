@@ -23,6 +23,25 @@ export function readXsrfToken(): string {
     return match ? decodeURIComponent(match[1]) : '';
 }
 
+export function haversineDistanceMeters(
+    lat1: number,
+    lng1: number,
+    lat2: number,
+    lng2: number,
+): number {
+    const earthRadiusM = 6371000;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos((lat1 * Math.PI) / 180) *
+            Math.cos((lat2 * Math.PI) / 180) *
+            Math.sin(dLng / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+
+    return Math.round(earthRadiusM * c * 100) / 100;
+}
+
 export async function issueGpsSessionToken(): Promise<{
     token: string;
     issued_at: number;

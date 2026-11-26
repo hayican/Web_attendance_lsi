@@ -139,7 +139,7 @@
                 autoplay
                 playsinline
                 muted
-                class="aspect-4/3 w-full object-cover"
+                class="aspect-3/4 max-h-72 w-full object-cover"
             ></video>
         </div>
 
@@ -156,7 +156,7 @@
             <img
                 src={previewUrl}
                 alt="Hasil foto kamera"
-                class="aspect-4/3 w-full rounded-lg border object-cover"
+                class="aspect-3/4 max-h-72 w-full rounded-lg border object-cover"
             />
         {/if}
 

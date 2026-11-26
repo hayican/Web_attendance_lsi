@@ -91,7 +91,7 @@ class SalesVisitController extends Controller
             ->orderBy('name')
             ->get(['id', 'name', 'exempt_short_duration']);
 
-        return Inertia::render('attendance/Sales', [
+        return Inertia::render('sales/Kunjungan', [
             'homeTimezone' => $homeOffice->timezone,
             'todayDate' => $todayBranch,
             'hasApprovedTimeOff' => $this->scheduleResolver->hasApprovedTimeOff($user->id, $todayBranch),
