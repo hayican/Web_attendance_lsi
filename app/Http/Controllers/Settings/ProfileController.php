@@ -8,7 +8,6 @@ use App\Http\Requests\Settings\ProfileDeleteRequest;
 use App\Http\Requests\Settings\ProfileUpdateRequest;
 use App\Models\User;
 use App\Services\ImageEvidenceService;
-use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -34,7 +33,6 @@ class ProfileController extends Controller
         };
 
         return Inertia::render($component, [
-            'mustVerifyEmail' => $user instanceof MustVerifyEmail,
             'status' => $request->session()->get('status'),
             'profilePhotoUrl' => $user->reference_photo_url !== null
                 ? $this->imageEvidence->signedUrl($user->reference_photo_url)

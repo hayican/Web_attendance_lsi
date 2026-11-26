@@ -128,7 +128,7 @@
                 <InputError message={errors.email} />
             </div>
 
-            {#if Boolean(page.props.mustVerifyEmail) && !user.email_verified_at}
+            {#if !user.email_verified_at}
                 <p class="text-[11px] leading-snug text-yellow-800">
                     Email belum terverifikasi.
                     <TextLink href={send()} as="button">
