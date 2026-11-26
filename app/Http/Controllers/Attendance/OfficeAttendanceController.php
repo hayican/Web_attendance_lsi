@@ -102,6 +102,27 @@ class OfficeAttendanceController extends Controller
             && $rejectedLog->clock_out_at === null
             && $nowLocal->lessThan($closeDeadline);
 
+        $recentLogs = AttendanceLog::query()
+            ->with('shift:id,code')
+            ->where('user_id', $user->id)
+            ->whereDate('work_date', '>=', $nowLocal->subDays(6)->toDateString())
+            ->whereDate('work_date', '<=', $workDate)
+            ->orderByDesc('work_date')
+            ->orderByDesc('attempt_no')
+            ->get()
+            ->map(fn (AttendanceLog $log): array => [
+                'id' => $log->id,
+                'date' => $log->work_date->toDateString(),
+                'attempt_no' => $log->attempt_no,
+                'shift' => $log->shift?->code,
+                'clock_in_at' => $log->clock_in_at?->setTimezone($timezone)->format('H:i'),
+                'clock_out_at' => $log->clock_out_at?->setTimezone($timezone)->format('H:i'),
+                'clock_in_status' => $log->clock_in_status->value,
+                'clock_out_status' => $log->clock_out_status?->value,
+                'clock_in_flags' => $log->clock_in_anomaly_flags ?? [],
+                'clock_out_flags' => $log->clock_out_anomaly_flags ?? [],
+            ]);
+
         return Inertia::render($component, [
             'office' => [
                 'id' => $office->id,
@@ -134,6 +155,7 @@ class OfficeAttendanceController extends Controller
             'activeLog' => $activeLog !== null ? $this->summarizeAttendanceLog($activeLog) : null,
             'rejectedLog' => $rejectedLog !== null ? $this->summarizeAttendanceLog($rejectedLog) : null,
             'canRetryRejected' => $canRetryRejected,
+            'recentLogs' => $recentLogs,
         ]);
     }
 

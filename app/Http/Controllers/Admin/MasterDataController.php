@@ -154,8 +154,54 @@ class MasterDataController extends Controller
             abort(403, 'Anda tidak berwenang melihat riwayat audit.');
         }
 
+        $records = AuditLog::query()
+            ->with('actor:id,nik,name')
+            ->latest('id')
+            ->limit(201)
+            ->get();
+
+        $logs = [];
+
+        foreach ($records as $index => $log) {
+            if ($index >= 200) {
+                break;
+            }
+
+            $older = $records->get($index + 1);
+            $hasHash = $log->row_hash !== null;
+
+            if (! $hasHash) {
+                $chainValid = true;
+            } elseif ($log->prev_hash === null) {
+                $chainValid = $older === null || $older->row_hash === null;
+            } else {
+                $chainValid = $older !== null
+                    && $older->row_hash !== null
+                    && hash_equals($older->row_hash, $log->prev_hash);
+            }
+
+            $logs[] = [
+                'id' => $log->id,
+                'actor' => $log->actor !== null
+                    ? ['nik' => $log->actor->nik, 'name' => $log->actor->name]
+                    : null,
+                'entity' => $log->entity,
+                'record_id' => $log->record_id,
+                'action' => $log->action->value,
+                'reason' => $log->reason,
+                'old_values' => $log->old_values,
+                'new_values' => $log->new_values,
+                'prev_hash' => $log->prev_hash,
+                'row_hash' => $log->row_hash,
+                'has_hash' => $hasHash,
+                'hash_valid' => $this->audit->verifyHash($log),
+                'chain_valid' => $chainValid,
+                'created_at' => $log->created_at->toIso8601String(),
+            ];
+        }
+
         return Inertia::render('admin/AuditLogs', [
-            'logs' => AuditLog::query()->with('actor:id,nik,name')->latest('id')->limit(200)->get(),
+            'logs' => $logs,
         ]);
     }
 

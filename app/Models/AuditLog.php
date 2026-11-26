@@ -6,12 +6,21 @@ use App\Enums\AuditAction;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Carbon;
 use RuntimeException;
 
 /**
  * @property int $id
+ * @property int $actor_id
+ * @property string $entity
+ * @property int $record_id
+ * @property AuditAction $action
+ * @property array<string, mixed>|null $old_values
+ * @property array<string, mixed>|null $new_values
+ * @property string|null $reason
  * @property string|null $prev_hash
  * @property string|null $row_hash
+ * @property Carbon $created_at
  */
 #[Fillable([
     'actor_id',

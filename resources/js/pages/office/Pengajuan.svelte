@@ -185,6 +185,7 @@
     let scheduledStartTime = $state('09:00');
     let attachment = $state<File | null>(null);
     let attachmentError = $state<string | null>(null);
+    let fileInput = $state<HTMLInputElement | null>(null);
     let submitting = $state(false);
     let cancellingId = $state<number | null>(null);
     let formError = $state<string | null>(null);
@@ -301,6 +302,7 @@
     const attachmentMissing = $derived(
         type === 'SAKIT' && attachment === null,
     );
+    const hasAttachment = $derived(attachment !== null);
 
     const canSubmit = $derived(
         !submitting &&
@@ -324,9 +326,8 @@
         startDate = nextMinDate;
         endDate = nextMinDate;
 
-        if (nextType !== 'SAKIT') {
-            attachment = null;
-            attachmentError = null;
+        if (nextType !== 'SAKIT' && nextType !== 'IZIN') {
+            clearAttachment();
         }
     }
 
@@ -338,11 +339,19 @@
         reason = '';
         destinationLocation = '';
         scheduledStartTime = '09:00';
-        attachment = null;
-        attachmentError = null;
+        clearAttachment();
         type = 'IZIN';
         startDate = todayDate;
         endDate = todayDate;
+    }
+
+    function clearAttachment() {
+        attachment = null;
+        attachmentError = null;
+
+        if (fileInput) {
+            fileInput.value = '';
+        }
     }
 
     function handleFileChange(event: Event) {
@@ -396,7 +405,10 @@
                 form.append('scheduled_start_time', scheduledStartTime);
             }
 
-            if (type === 'SAKIT' && attachment !== null) {
+            if (
+                (type === 'SAKIT' || type === 'IZIN') &&
+                attachment !== null
+            ) {
                 form.append('attachment', attachment);
             }
 
@@ -449,8 +461,7 @@
             };
             reason = '';
             destinationLocation = '';
-            attachment = null;
-            attachmentError = null;
+            clearAttachment();
             router.reload();
         } catch {
             formError = 'Koneksi bermasalah. Silakan coba lagi.';
@@ -765,7 +776,9 @@
                             class="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-primary underline-offset-2 hover:underline"
                         >
                             <Paperclip class="size-3.5" />
-                            Lihat lampiran SKD
+                            {item.type === 'SAKIT'
+                                ? 'Lihat lampiran SKD'
+                                : 'Lihat lampiran'}
                         </a>
                     {/if}
 
@@ -988,30 +1001,67 @@
             </p>
         {/if}
 
-        {#if type === 'SAKIT'}
+        {#if type === 'SAKIT' || type === 'IZIN'}
             <div
-                class="mt-3 rounded-md border border-red-200 bg-red-50/60 p-2.5"
+                class="mt-3 rounded-md border p-2.5 {type === 'SAKIT'
+                    ? hasAttachment
+                        ? 'border-green-300 bg-green-50/60'
+                        : 'border-red-200 bg-red-50/60'
+                    : 'border-stone-200 bg-stone-50'}"
             >
                 <p
-                    class="flex items-center gap-1.5 text-[11px] font-semibold text-red-800"
+                    class="flex items-center gap-1.5 text-[11px] font-semibold {type ===
+                    'SAKIT'
+                        ? hasAttachment
+                            ? 'text-green-800'
+                            : 'text-red-800'
+                        : 'text-stone-700'}"
                 >
-                    <FileText class="size-3.5" />
-                    Surat Keterangan Dokter (wajib)
+                    {#if type === 'SAKIT'}
+                        {#if hasAttachment}
+                            <CircleCheck class="size-3.5" />
+                            Surat Keterangan Dokter (terlampir)
+                        {:else}
+                            <FileText class="size-3.5" />
+                            Surat Keterangan Dokter (wajib)
+                        {/if}
+                    {:else}
+                        <Paperclip class="size-3.5" />
+                        Lampiran (opsional)
+                    {/if}
                 </p>
                 <input
+                    bind:this={fileInput}
                     type="file"
                     accept=".jpg,.jpeg,.png,.pdf"
                     onchange={handleFileChange}
                     class="mt-1.5 block w-full text-[11px] text-stone-700 file:mr-2 file:rounded-md file:border-0 file:bg-white file:px-2 file:py-1 file:text-[11px] file:font-medium file:text-stone-700"
                 />
-                <p class="mt-1 text-[10px] text-red-700">
+                <p
+                    class="mt-1 text-[10px] {type === 'SAKIT'
+                        ? hasAttachment
+                            ? 'text-green-700'
+                            : 'text-red-700'
+                        : 'text-stone-500'}"
+                >
                     Format JPG/PNG/PDF, maksimal 2 MB.
                 </p>
                 {#if attachment}
-                    <p class="mt-1 text-[11px] font-medium text-stone-700">
-                        {attachment.name} ·
-                        {Math.round(attachment.size / 1024)} KB
-                    </p>
+                    <div
+                        class="mt-1 flex items-center justify-between gap-2"
+                    >
+                        <p class="text-[11px] font-medium text-stone-700">
+                            {attachment.name} ·
+                            {Math.round(attachment.size / 1024)} KB
+                        </p>
+                        <button
+                            type="button"
+                            class="text-[11px] font-medium text-red-700 hover:underline"
+                            onclick={clearAttachment}
+                        >
+                            Hapus
+                        </button>
+                    </div>
                 {/if}
                 {#if attachmentError}
                     <p class="mt-1 text-[11px] font-medium text-red-700">

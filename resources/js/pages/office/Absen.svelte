@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte';
     import { router } from '@inertiajs/svelte';
+    import { Link } from '@inertiajs/svelte';
     import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
     import CircleCheck from '@lucide/svelte/icons/circle-check';
     import MapPin from '@lucide/svelte/icons/map-pin';
@@ -8,6 +9,7 @@
     import AppHead from '@/components/AppHead.svelte';
     import LiveCameraCapture from '@/components/LiveCameraCapture.svelte';
     import { Button } from '@/components/ui/button';
+    import { Sheet, SheetContent } from '@/components/ui/sheet';
     import {
         isInAppBrowser,
         recommendedExternalBrowserInstruction,
@@ -77,6 +79,18 @@
         activeLog: AttendanceSummary | null;
         rejectedLog: AttendanceSummary | null;
         canRetryRejected: boolean;
+        recentLogs: {
+            id: number;
+            date: string;
+            attempt_no: number;
+            shift: string | null;
+            clock_in_at: string | null;
+            clock_out_at: string | null;
+            clock_in_status: VerificationStatus;
+            clock_out_status: VerificationStatus | null;
+            clock_in_flags: string[];
+            clock_out_flags: string[];
+        }[];
     };
 
     let {
@@ -93,6 +107,7 @@
         activeLog,
         rejectedLog,
         canRetryRejected,
+        recentLogs,
     }: OfficeProps = $props();
 
     const badgeBase =
@@ -197,6 +212,16 @@
         }).format(new Date(ms));
     }
 
+    function formatLogDate(value: string): string {
+        const [year, month, day] = value.split('-');
+
+        return year && month && day ? `${day}-${month}-${year}` : value;
+    }
+
+    function recentFlags(log: OfficeProps['recentLogs'][number]): string[] {
+        return [...new Set([...log.clock_in_flags, ...log.clock_out_flags])];
+    }
+
     const dateLabel = $derived.by(
         () =>
             new Intl.DateTimeFormat('id-ID', {
@@ -218,6 +243,7 @@
     let latePermission = $state(false);
     let submitting = $state(false);
     let cameraKey = $state(0);
+    let sheetOpen = $state(false);
     let feedback = $state<{
         type: 'error' | 'success';
         message: string;
@@ -500,6 +526,9 @@
             !(rejectedLog !== null && !canRetryRejected),
     );
 
+    const canClockIn = $derived(showForm && !isClockOutMode);
+    const canClockOut = $derived(showForm && isClockOutMode);
+
     const nextAttemptNo = $derived(
         isClockOutMode
             ? (activeLog?.attempt_no ?? 1)
@@ -562,6 +591,15 @@
               ? 'Absen Ulang Sekarang'
               : 'Clock-In Sekarang',
     );
+
+    function openAttendance() {
+        if (!canClockIn && !canClockOut) {
+            return;
+        }
+
+        feedback = null;
+        sheetOpen = true;
+    }
 
     async function submitAttendance() {
         if (submitting) {
@@ -737,6 +775,7 @@
             notes = '';
             latePermission = false;
             cameraKey += 1;
+            sheetOpen = false;
             feedback = {
                 type: 'success',
                 message: isClockOutMode
@@ -797,6 +836,27 @@
             </p>
         </div>
     {/if}
+
+    <div class="grid grid-cols-2 gap-2">
+        <Button
+            type="button"
+            class="min-h-12"
+            variant={canClockIn ? 'default' : 'outline'}
+            disabled={!canClockIn}
+            onclick={openAttendance}
+        >
+            Clock-In
+        </Button>
+        <Button
+            type="button"
+            class="min-h-12"
+            variant={canClockOut ? 'default' : 'outline'}
+            disabled={!canClockOut}
+            onclick={openAttendance}
+        >
+            Clock-Out
+        </Button>
+    </div>
 
     {#if feedback}
         <div
@@ -950,6 +1010,77 @@
         {/if}
     </section>
 
+    <section class="rounded-xl border border-stone-200 bg-white p-3 shadow-xs">
+        <div class="flex items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold text-stone-900">
+                Riwayat 1 Minggu
+            </h2>
+            <span class="text-[11px] text-stone-500">
+                {recentLogs.length} catatan
+            </span>
+        </div>
+
+        {#if recentLogs.length === 0}
+            <p class="mt-2 text-[11px] text-stone-500">
+                Belum ada absensi dalam 7 hari terakhir.
+            </p>
+        {:else}
+            <div class="mt-2 divide-y divide-stone-100">
+                {#each recentLogs as log (log.id)}
+                    {@const inMeta = verificationMeta(log.clock_in_status)}
+                    {@const outMeta =
+                        log.clock_out_status !== null
+                            ? verificationMeta(log.clock_out_status)
+                            : null}
+                    <div class="py-2 first:pt-0 last:pb-0">
+                        <div class="flex items-start justify-between gap-2">
+                            <div>
+                                <p class="text-[11px] text-stone-500">
+                                    {formatLogDate(log.date)}
+                                    {#if log.attempt_no > 1}
+                                        · Percobaan #{log.attempt_no}
+                                    {/if}
+                                </p>
+                                <p class="text-xs font-medium text-stone-800">
+                                    Shift {log.shift ?? '—'}
+                                </p>
+                            </div>
+                            <div class="flex flex-wrap justify-end gap-1">
+                                <span class={inMeta.className}>
+                                    {inMeta.label}
+                                </span>
+                                {#if outMeta}
+                                    <span class={outMeta.className}>
+                                        {outMeta.label}
+                                    </span>
+                                {/if}
+                            </div>
+                        </div>
+                        <p
+                            class="mt-0.5 font-mono text-[11px] tabular-nums text-stone-600"
+                        >
+                            Masuk {log.clock_in_at ?? '—'} · Pulang {log.clock_out_at ?? '—'}
+                        </p>
+                        {#if recentFlags(log).length > 0}
+                            <div class="mt-1 flex flex-wrap gap-1">
+                                {#each recentFlags(log) as flag (flag)}
+                                    <span class={flagBadge(flag)}>{flagLabel(flag)}</span>
+                                {/each}
+                            </div>
+                        {/if}
+                    </div>
+                {/each}
+            </div>
+        {/if}
+
+        <Link
+            href="/attendance/history"
+            class="mt-2 flex min-h-11 items-center justify-center rounded-md border border-stone-300 text-[12px] font-medium text-stone-700 hover:bg-stone-50"
+        >
+            Lihat Riwayat Lainnya
+        </Link>
+    </section>
+
     {#if rejectedLog !== null && !isFinishedToday}
         <section class="rounded-xl border border-red-300 bg-red-50 p-3">
             <p
@@ -1066,11 +1197,16 @@
         </p>
     {/if}
 
+    <Sheet bind:open={sheetOpen}>
+        <SheetContent
+            side="bottom"
+            class="max-h-[92dvh] overflow-y-auto rounded-t-xl p-4 pb-[calc(1rem_+_env(safe-area-inset-bottom))]"
+        >
     {#if showForm}
         <section
             class="rounded-xl border border-stone-200 bg-white p-3 shadow-xs"
         >
-            <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center justify-between gap-2 pr-8">
                 <h2 class="text-sm font-semibold text-stone-900">
                     {formTitle}
                 </h2>
@@ -1164,6 +1300,7 @@
                 {#key cameraKey}
                     <LiveCameraCapture
                         facingMode="user"
+                        autoStart
                         disabled={submitting}
                         onCapture={(payload) => {
                             capturedPhoto = payload;
@@ -1225,6 +1362,15 @@
                 {/if}
             </div>
 
+            {#if feedback?.type === 'error'}
+                <p
+                    class="mt-3 rounded-md bg-destructive/10 p-2 text-sm text-destructive"
+                    role="alert"
+                >
+                    {feedback.message}
+                </p>
+            {/if}
+
             <Button
                 type="button"
                 class="mt-3 min-h-12 w-full"
@@ -1238,4 +1384,6 @@
             </p>
         </section>
     {/if}
+        </SheetContent>
+    </Sheet>
 </div>

@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Services\AuditLogger;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Inertia\Testing\AssertableInertia;
 
 test('audit logs are hash-chained and append-only', function () {
     $actor = User::factory()->create();
@@ -31,6 +32,8 @@ test('audit logs are hash-chained and append-only', function () {
     expect($first->row_hash)->toMatch('/^[a-f0-9]{64}$/')
         ->and($second->prev_hash)->toBe($first->row_hash)
         ->and($second->row_hash)->toMatch('/^[a-f0-9]{64}$/')
+        ->and($logger->verifyHash($first))->toBeTrue()
+        ->and($logger->verifyHash($second))->toBeTrue()
         ->and(fn () => $first->update(['reason' => 'tampered']))
         ->toThrow(RuntimeException::class)
         ->and(fn () => $first->delete())
@@ -48,6 +51,64 @@ test('audit logs are readable by HR admins and flagged users only', function () 
     $this->actingAs($hr)->get('/admin/audit-logs')->assertOk();
     $this->actingAs($viewer)->get('/admin/audit-logs')->assertOk();
     $this->actingAs($plain)->get('/admin/audit-logs')->assertForbidden();
+});
+
+test('audit log page exposes verified diff data', function () {
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN]);
+
+    app(AuditLogger::class)->log(
+        actorId: $hr->id,
+        entity: 'users',
+        recordId: $hr->id,
+        action: AuditAction::UPDATE,
+        oldValues: ['name' => 'Old'],
+        newValues: ['name' => 'New'],
+        reason: 'Uji audit',
+    );
+
+    $this->actingAs($hr)
+        ->get('/admin/audit-logs')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/AuditLogs')
+            ->has('logs', 1)
+            ->where('logs.0.action', AuditAction::UPDATE->value)
+            ->where('logs.0.actor.nik', $hr->nik)
+            ->where('logs.0.old_values.name', 'Old')
+            ->where('logs.0.new_values.name', 'New')
+            ->where('logs.0.reason', 'Uji audit')
+            ->where('logs.0.has_hash', true)
+            ->where('logs.0.hash_valid', true)
+            ->where('logs.0.chain_valid', true)
+        );
+});
+
+test('audit page marks pre-hash logs as legacy', function () {
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN]);
+
+    DB::table('audit_logs')->insert([
+        'actor_id' => $hr->id,
+        'entity' => 'users',
+        'record_id' => $hr->id,
+        'action' => AuditAction::CREATE->value,
+        'old_values' => null,
+        'new_values' => null,
+        'reason' => null,
+        'prev_hash' => null,
+        'row_hash' => null,
+        'created_at' => now('UTC'),
+    ]);
+
+    $this->actingAs($hr)
+        ->get('/admin/audit-logs')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('admin/AuditLogs')
+            ->has('logs', 1)
+            ->where('logs.0.has_hash', false)
+            ->where('logs.0.hash_valid', false)
+            ->where('logs.0.chain_valid', true)
+        );
 });
 
 test('deactivating and reactivating a user stamps and clears deactivated_at', function () {
