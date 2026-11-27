@@ -11,7 +11,7 @@ use RuntimeException;
 
 /**
  * @property int $id
- * @property int $actor_id
+ * @property int|null $actor_id
  * @property string $entity
  * @property int $record_id
  * @property AuditAction $action

@@ -44,9 +44,11 @@ class CloseMissedAttendanceCommand extends Command
             // @phpstan-ignore nullsafe.neverNull (Larastan treats the nullable shift relation as non-null)
             $autoCloseHours = $log->auto_close_hours ?? $log->shift?->auto_close_hours ?? 5;
 
+            $endOfDay = CarbonImmutable::parse("{$workDate} 23:59:00", $timezone);
             $deadline = $effectiveEnd !== null
                 ? $effectiveEnd->addHours($autoCloseHours)
-                : CarbonImmutable::parse("{$workDate} 23:59:00", $timezone);
+                : $endOfDay;
+            $deadline = $deadline->greaterThan($endOfDay) ? $endOfDay : $deadline;
 
             if ($nowLocal->greaterThanOrEqualTo($deadline)) {
                 $flags = $log->clock_out_anomaly_flags ?? [];

@@ -36,7 +36,7 @@ class AntiFraudService
             $flags[] = 'STALE_TIMESTAMP';
         }
 
-        if ($this->detectImpossibleTravel($userId, $localDate, $lat, $lng, $nowUtc)) {
+        if ($this->detectImpossibleTravel($userId, $localDate, $lat, $lng, $accuracyM, $nowUtc)) {
             $flags[] = 'IMPOSSIBLE_TRAVEL';
         }
 
@@ -65,10 +65,14 @@ class AntiFraudService
         string $localDate,
         float $lat,
         float $lng,
+        float $accuracyM,
         CarbonImmutable $nowUtc,
     ): bool {
-        /** @var list<array{at: int, lat: float, lng: float}> $points */
+        /** @var list<array{at: int, lat: float, lng: float, acc: float}> $points */
         $points = [];
+
+        // Points with accuracy worse than 500 m are noise for travel speed (PRD v8 FR-3).
+        $isUsableAccuracy = static fn (?string $acc): bool => $acc === null || (float) $acc <= 500.0;
 
         $logs = AttendanceLog::query()
             ->where('user_id', $userId)
@@ -77,18 +81,22 @@ class AntiFraudService
             ->get();
 
         foreach ($logs as $log) {
-            if ($log->clock_in_at !== null && $log->clock_in_lat !== null && $log->clock_in_lng !== null) {
+            if ($log->clock_in_at !== null && $log->clock_in_lat !== null && $log->clock_in_lng !== null
+                && $isUsableAccuracy($log->clock_in_accuracy_m)) {
                 $points[] = [
                     'at' => (int) $log->clock_in_at->getTimestamp(),
                     'lat' => (float) $log->clock_in_lat,
                     'lng' => (float) $log->clock_in_lng,
+                    'acc' => (float) ($log->clock_in_accuracy_m ?? 0),
                 ];
             }
-            if ($log->clock_out_at !== null && $log->clock_out_lat !== null && $log->clock_out_lng !== null) {
+            if ($log->clock_out_at !== null && $log->clock_out_lat !== null && $log->clock_out_lng !== null
+                && $isUsableAccuracy($log->clock_out_accuracy_m)) {
                 $points[] = [
                     'at' => (int) $log->clock_out_at->getTimestamp(),
                     'lat' => (float) $log->clock_out_lat,
                     'lng' => (float) $log->clock_out_lng,
+                    'acc' => (float) ($log->clock_out_accuracy_m ?? 0),
                 ];
             }
         }
@@ -101,18 +109,22 @@ class AntiFraudService
             ->get();
 
         foreach ($visits as $visit) {
-            if ($visit->visit_in_at !== null && $visit->visit_in_lat !== null && $visit->visit_in_lng !== null) {
+            if ($visit->visit_in_at !== null && $visit->visit_in_lat !== null && $visit->visit_in_lng !== null
+                && $isUsableAccuracy($visit->visit_in_accuracy_m)) {
                 $points[] = [
                     'at' => (int) $visit->visit_in_at->getTimestamp(),
                     'lat' => (float) $visit->visit_in_lat,
                     'lng' => (float) $visit->visit_in_lng,
+                    'acc' => (float) ($visit->visit_in_accuracy_m ?? 0),
                 ];
             }
-            if ($visit->visit_out_at !== null && $visit->visit_out_lat !== null && $visit->visit_out_lng !== null) {
+            if ($visit->visit_out_at !== null && $visit->visit_out_lat !== null && $visit->visit_out_lng !== null
+                && $isUsableAccuracy($visit->visit_out_accuracy_m)) {
                 $points[] = [
                     'at' => (int) $visit->visit_out_at->getTimestamp(),
                     'lat' => (float) $visit->visit_out_lat,
                     'lng' => (float) $visit->visit_out_lng,
+                    'acc' => (float) ($visit->visit_out_accuracy_m ?? 0),
                 ];
             }
         }
@@ -124,11 +136,12 @@ class AntiFraudService
         usort($points, fn (array $a, array $b): int => $b['at'] <=> $a['at']);
         $latest = $points[0];
 
-        $distanceKm = $this->geo->haversineMeters($latest['lat'], $latest['lng'], $lat, $lng) / 1000.0;
+        $rawDistanceKm = $this->geo->haversineMeters($latest['lat'], $latest['lng'], $lat, $lng) / 1000.0;
+        $netDistanceKm = $rawDistanceKm - (($latest['acc'] + $accuracyM) / 1000.0);
         $seconds = max(1, abs((int) $nowUtc->getTimestamp() - $latest['at']));
-        $speedKmh = $distanceKm / ($seconds / 3600.0);
+        $speedKmh = max(0.0, $netDistanceKm) / ($seconds / 3600.0);
 
-        return $distanceKm > 5.0 && $speedKmh > 120.0;
+        return $netDistanceKm > 5.0 && $speedKmh > 120.0;
     }
 
     public function detectRepeatedCoords(

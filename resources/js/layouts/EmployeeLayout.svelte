@@ -1,11 +1,13 @@
 <script lang="ts">
-    import { Link } from '@inertiajs/svelte';
+    import { Link, router } from '@inertiajs/svelte';
     import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+    import Bell from '@lucide/svelte/icons/bell';
     import CalendarCheck from '@lucide/svelte/icons/calendar-check';
     import Clock from '@lucide/svelte/icons/clock';
     import MapPin from '@lucide/svelte/icons/map-pin';
     import User from '@lucide/svelte/icons/user';
     import { onMount, type Component, type Snippet } from 'svelte';
+    import { Sheet, SheetContent } from '@/components/ui/sheet';
     import { Toaster } from '@/components/ui/sonner';
     import { currentUrlState } from '@/lib/currentUrl.svelte';
     import { toUrl } from '@/lib/utils';
@@ -28,17 +30,40 @@
         icon: Component;
     };
 
+    type AppNotification = {
+        id: string;
+        title: string;
+        message: string;
+        read: boolean;
+        url: string | null;
+        created_at: string | null;
+    };
+
     let {
         office = null,
         serverTimeIso = null,
         auth,
+        notifications = [],
+        unreadNotifications = 0,
         children,
     }: {
         office?: ShellOffice | null;
         serverTimeIso?: string | null;
         auth?: { user?: { role?: string } };
+        notifications?: AppNotification[];
+        unreadNotifications?: number;
         children?: Snippet;
     } = $props();
+
+    let notificationSheetOpen = $state(false);
+
+    function openNotifications() {
+        notificationSheetOpen = true;
+
+        if (unreadNotifications > 0) {
+            router.post('/notifications/read-all', {}, { preserveScroll: true });
+        }
+    }
 
     const url = currentUrlState();
     const role = $derived(auth?.user?.role ?? 'EMPLOYEE_OFFICE');
@@ -153,16 +178,68 @@
                 </div>
             </div>
 
-            {#if clockText}
-                <p
-                    class="font-mono text-sm font-semibold tabular-nums text-stone-900"
-                    aria-label="Jam server"
+            <div class="flex items-center gap-1">
+                <button
+                    type="button"
+                    class="relative flex min-h-11 min-w-11 items-center justify-center rounded-md text-stone-600 hover:bg-stone-100"
+                    aria-label="Notifikasi"
+                    onclick={openNotifications}
                 >
-                    {clockText}
-                </p>
-            {/if}
+                    <Bell class="size-4" />
+                    {#if unreadNotifications > 0}
+                        <span
+                            class="absolute top-1.5 right-1.5 flex size-4 items-center justify-center rounded-full bg-red-600 text-[9px] font-semibold text-white"
+                        >
+                            {unreadNotifications > 9 ? '9+' : unreadNotifications}
+                        </span>
+                    {/if}
+                </button>
+                {#if clockText}
+                    <p
+                        class="font-mono text-sm font-semibold tabular-nums text-stone-900"
+                        aria-label="Jam server"
+                    >
+                        {clockText}
+                    </p>
+                {/if}
+            </div>
         </div>
     </header>
+
+    <Sheet bind:open={notificationSheetOpen}>
+        <SheetContent
+            side="bottom"
+            class="max-h-[80dvh] overflow-y-auto rounded-t-xl p-4 pb-[calc(1rem_+_env(safe-area-inset-bottom))]"
+        >
+            <h2 class="text-base font-semibold">Notifikasi</h2>
+            {#if notifications.length === 0}
+                <p class="text-sm text-stone-500">Belum ada notifikasi.</p>
+            {:else}
+                <div class="flex flex-col gap-2">
+                    {#each notifications as item (item.id)}
+                        {#if item.url}
+                            <a
+                                href={item.url}
+                                class="rounded-md border border-stone-200 p-2 text-xs hover:bg-stone-50"
+                            >
+                                <p class="text-sm font-medium text-stone-900">
+                                    {item.title}
+                                </p>
+                                <p class="text-stone-600">{item.message}</p>
+                            </a>
+                        {:else}
+                            <div class="rounded-md border border-stone-200 p-2 text-xs">
+                                <p class="text-sm font-medium text-stone-900">
+                                    {item.title}
+                                </p>
+                                <p class="text-stone-600">{item.message}</p>
+                            </div>
+                        {/if}
+                    {/each}
+                </div>
+            {/if}
+        </SheetContent>
+    </Sheet>
 
     <main
         class="mx-auto w-full max-w-lg flex-1 px-3 py-3 pb-[calc(4.5rem_+_env(safe-area-inset-bottom))]"

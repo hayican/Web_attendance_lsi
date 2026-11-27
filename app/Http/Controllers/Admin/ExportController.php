@@ -11,6 +11,7 @@ use App\Enums\ScheduleSource;
 use App\Enums\UserRole;
 use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
+use App\Exports\TabularReportExport;
 use App\Http\Controllers\Controller;
 use App\Models\AttendanceLog;
 use App\Models\Holiday;
@@ -29,6 +30,9 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Validation\ValidationException;
+use Maatwebsite\Excel\Excel as ExcelFormat;
+use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ExportController extends Controller
@@ -39,9 +43,9 @@ class ExportController extends Controller
         private readonly LeaveBalanceService $balanceService,
     ) {}
 
-    public function talentaOffice(Request $request): StreamedResponse|JsonResponse
+    public function talentaOffice(Request $request): StreamedResponse|BinaryFileResponse|JsonResponse
     {
-        [$start, $end, $actor] = $this->validateExportRange($request);
+        [$start, $end, $actor, $format] = $this->validateExportRange($request);
 
         if (! $request->boolean('confirm_pending')) {
             $pendingCount = LeaveRequest::query()
@@ -92,7 +96,6 @@ class ExportController extends Controller
 
         $officeUsers = User::query()
             ->with(['officeLocation'])
-            ->where('is_active', true)
             ->whereIn('role', [UserRole::EMPLOYEE_OFFICE, UserRole::HR_ADMIN])
             ->orderBy('nik')
             ->get();
@@ -128,10 +131,10 @@ class ExportController extends Controller
 
         $usedReplacementOrigins = UserShiftSchedule::query()
             ->whereIn('user_id', $officeUserIds)
-            ->whereNotNull('replacement_for_date')
-            ->get(['user_id', 'replacement_for_date'])
+            ->whereNotNull('compensation_source_date')
+            ->get(['user_id', 'compensation_source_date'])
             ->mapWithKeys(fn (UserShiftSchedule $schedule): array => [
-                $schedule->user_id.'|'.$schedule->replacement_for_date->toDateString() => true,
+                $schedule->user_id.'|'.$schedule->compensation_source_date->toDateString() => true,
             ]);
 
         $headers = [
@@ -151,6 +154,15 @@ class ExportController extends Controller
 
             while ($cursor->lessThanOrEqualTo($end)) {
                 $dateStr = $cursor->toDateString();
+
+                // PRD v8: employment window decides coverage, not the current is_active flag.
+                if ($dateStr < $user->join_date->toDateString()
+                    || ($user->deactivated_at !== null && $dateStr > $user->deactivated_at->toDateString())) {
+                    $cursor = $cursor->addDay();
+
+                    continue;
+                }
+
                 $key = $user->id.'|'.$dateStr;
                 $schedule = $schedulesByUserDate->get($key);
                 $shift = $schedule?->shift;
@@ -252,16 +264,18 @@ class ExportController extends Controller
             entity: 'attendance_logs',
             recordId: 0,
             action: AuditAction::EXPORT_ATTENDANCE,
-            newValues: ['file' => 'talenta_office', 'start_date' => $start->toDateString(), 'end_date' => $end->toDateString()],
+            newValues: ['file' => 'talenta_office', 'start_date' => $start->toDateString(), 'end_date' => $end->toDateString(), 'format' => $format],
         );
 
-        return $this->streamCsv('talenta-office-'.$start->toDateString().'.csv', $headers, $rows);
+        return $this->downloadReport('talenta-office-'.$start->toDateString(), 'Sheet1', $headers, $rows, $format);
     }
 
-    public function salesVisits(Request $request): StreamedResponse
+    public function salesVisits(Request $request): StreamedResponse|BinaryFileResponse|JsonResponse
     {
-        [$start, $end, $actor] = $this->validateExportRange($request);
+        [$start, $end, $actor, $format] = $this->validateExportRange($request);
         $includeUnverified = $request->boolean('include_unverified');
+        $startDate = $start->toDateString();
+        $endDate = $end->toDateString();
 
         $headers = [
             'Date', 'Check Time', 'Type', 'Employee ID', 'Full Name', 'Job Position',
@@ -270,58 +284,281 @@ class ExportController extends Controller
             'Description', 'Mobile Flag', 'Status',
         ];
 
-        $visits = SalesVisit::query()
-            ->with(['user:id,nik,name,job_position', 'outletLocation'])
-            ->whereDate('visit_date', '>=', $start->toDateString())
-            ->whereDate('visit_date', '<=', $end->toDateString())
-            ->where('visit_status', '!=', VisitStatus::CANCELLED)
-            ->when(! $includeUnverified, function ($query): void {
-                $query->whereIn('verification_status', [
-                    VerificationStatus::AUTO_APPROVED->value,
-                    VerificationStatus::APPROVED->value,
-                ]);
+        $salesUsers = User::query()
+            ->with(['officeLocation:id,name,address,timezone,work_days'])
+            ->where('role', UserRole::EMPLOYEE_SALES)
+            ->whereDate('join_date', '<=', $endDate)
+            ->where(function ($query) use ($startDate): void {
+                $query->whereNull('deactivated_at')
+                    ->orWhereDate('deactivated_at', '>=', $startDate);
             })
+            ->orderBy('nik')
+            ->get();
+
+        $salesUserIds = $salesUsers->pluck('id');
+
+        $rangeVisits = SalesVisit::query()
+            ->with(['user:id,nik,name,job_position', 'outletLocation'])
+            ->whereDate('visit_date', '>=', $startDate)
+            ->whereDate('visit_date', '<=', $endDate)
             ->orderBy('visit_date')
             ->orderBy('visit_in_at')
             ->get();
 
+        $visitsByUserDate = $rangeVisits->groupBy(
+            fn (SalesVisit $visit): string => $visit->user_id.'|'.$visit->visit_date->toDateString()
+        );
+
+        $exportedVisits = $rangeVisits
+            ->reject(fn (SalesVisit $visit): bool => $visit->visit_status === VisitStatus::CANCELLED)
+            ->filter(fn (SalesVisit $visit): bool => $includeUnverified
+                || in_array($visit->verification_status, [VerificationStatus::AUTO_APPROVED, VerificationStatus::APPROVED], true));
+
+        $exportedByUserDate = $exportedVisits->groupBy(
+            fn (SalesVisit $visit): string => $visit->user_id.'|'.$visit->visit_date->toDateString()
+        );
+        $exportedByDate = $exportedVisits->groupBy(
+            fn (SalesVisit $visit): string => $visit->visit_date->toDateString()
+        );
+
+        if (! $request->boolean('confirm_pending')) {
+            $pendingLeaveCount = LeaveRequest::query()
+                ->where('status', LeaveStatus::PENDING)
+                ->whereIn('user_id', $salesUserIds)
+                ->whereDate('start_date', '<=', $endDate)
+                ->whereDate('end_date', '>=', $startDate)
+                ->count();
+
+            $pendingReviewCount = 0;
+            $pendingInProgressCount = 0;
+
+            if (! $includeUnverified) {
+                foreach ($visitsByUserDate as $groupKey => $dayVisits) {
+                    $nonCancelled = $dayVisits->reject(
+                        fn (SalesVisit $visit): bool => $visit->visit_status === VisitStatus::CANCELLED
+                    );
+
+                    if ($nonCancelled->isEmpty()
+                        || $exportedByUserDate->get($groupKey, Collection::empty())->isNotEmpty()) {
+                        continue;
+                    }
+
+                    $pending = $nonCancelled->filter(fn (SalesVisit $visit): bool => $visit->verification_status === VerificationStatus::PENDING_REVIEW
+                        || $visit->visit_status === VisitStatus::IN_PROGRESS);
+
+                    if ($pending->isEmpty()) {
+                        continue;
+                    }
+
+                    $pendingReviewCount += $pending
+                        ->filter(fn (SalesVisit $visit): bool => $visit->verification_status === VerificationStatus::PENDING_REVIEW)
+                        ->count();
+                    $pendingInProgressCount += $pending
+                        ->filter(fn (SalesVisit $visit): bool => $visit->visit_status === VisitStatus::IN_PROGRESS)
+                        ->count();
+                }
+            }
+
+            if ($pendingLeaveCount > 0 || $pendingReviewCount > 0 || $pendingInProgressCount > 0) {
+                $parts = [];
+                if ($pendingLeaveCount > 0) {
+                    $parts[] = "{$pendingLeaveCount} pengajuan Cuti/Izin/Sakit PENDING";
+                }
+                if ($pendingReviewCount > 0) {
+                    $parts[] = "{$pendingReviewCount} kunjungan sales PENDING_REVIEW";
+                }
+                if ($pendingInProgressCount > 0) {
+                    $parts[] = "{$pendingInProgressCount} kunjungan sales IN_PROGRESS";
+                }
+
+                return response()->json([
+                    'requires_pending_confirmation' => true,
+                    'pending_count' => $pendingLeaveCount,
+                    'pending_leave_count' => $pendingLeaveCount,
+                    'pending_sales_visit_count' => $pendingReviewCount,
+                    'pending_sales_in_progress_count' => $pendingInProgressCount,
+                    'pending_items' => [
+                        'leave' => $pendingLeaveCount,
+                        'visit_pending_review' => $pendingReviewCount,
+                        'visit_in_progress' => $pendingInProgressCount,
+                    ],
+                    'message' => 'Masih ada '.implode(' dan ', $parts).' di periode ini. Tanggal terkait dilewati dari baris payroll sampai data ditinjau. Tetap export?',
+                ], 409);
+            }
+        }
+
+        $mappings = TalentaMapping::query()->pluck('mapping_value', 'mapping_key');
+        $absentCode = (string) ($mappings['attendance_absent'] ?? 'A');
+
+        $holidaysByDate = Holiday::query()
+            ->whereDate('holiday_date', '>=', $startDate)
+            ->whereDate('holiday_date', '<=', $endDate)
+            ->get(['holiday_date', 'location_id', 'holiday_type'])
+            ->groupBy(fn (Holiday $holiday): string => $holiday->holiday_date->toDateString());
+
+        $schedulesByUserDate = UserShiftSchedule::query()
+            ->whereIn('user_id', $salesUserIds)
+            ->whereDate('work_date', '>=', $startDate)
+            ->whereDate('work_date', '<=', $endDate)
+            ->get()
+            ->keyBy(fn (UserShiftSchedule $schedule): string => $schedule->user_id.'|'.$schedule->work_date->toDateString());
+
+        $leaveDaysByUserDate = LeaveRequestDay::query()
+            ->with('leaveRequest:id,type')
+            ->whereIn('user_id', $salesUserIds)
+            ->whereDate('leave_date', '>=', $startDate)
+            ->whereDate('leave_date', '<=', $endDate)
+            ->where('status', LeaveDayStatus::APPROVED)
+            ->get()
+            ->keyBy(fn (LeaveRequestDay $day): string => $day->user_id.'|'.$day->leave_date->toDateString());
+
+        $todayLocalByUser = [];
+        foreach ($salesUsers as $salesUser) {
+            $todayLocalByUser[$salesUser->id] = CarbonImmutable::now('UTC')
+                ->setTimezone($salesUser->officeLocation->timezone)
+                ->toDateString();
+        }
+
         $rows = [];
-        foreach ($visits as $visit) {
-            $tz = $visit->outletLocation->timezone;
-            $coord = ($visit->visit_in_lat !== null && $visit->visit_in_lng !== null)
-                ? "{$visit->visit_in_lat},{$visit->visit_in_lng}"
-                : '';
-            $flag = $visit->source->value === 'MANUAL_HR' ? 'Manual HR' : 'Mobile App';
-            $statusLabel = match ($visit->verification_status) {
-                VerificationStatus::AUTO_APPROVED, VerificationStatus::APPROVED => 'Approved',
-                VerificationStatus::PENDING_REVIEW => 'Pending',
-                VerificationStatus::REJECTED => 'Rejected',
-            };
+        $cursor = $start;
 
-            if ($visit->visit_in_at !== null) {
-                $localIn = $visit->visit_in_at->setTimezone($tz);
+        while ($cursor->lessThanOrEqualTo($end)) {
+            $dateStr = $cursor->toDateString();
+
+            foreach ($salesUsers as $user) {
+                if ($user->join_date->toDateString() > $dateStr) {
+                    continue;
+                }
+
+                if ($user->deactivated_at !== null && $user->deactivated_at->toDateString() < $dateStr) {
+                    continue;
+                }
+
+                $key = $user->id.'|'.$dateStr;
+                $dayVisits = $visitsByUserDate->get($key, Collection::empty());
+                $nonCancelled = $dayVisits->reject(
+                    fn (SalesVisit $visit): bool => $visit->visit_status === VisitStatus::CANCELLED
+                );
+                $dayExported = $exportedByUserDate->get($key, Collection::empty());
+
+                if ($dayExported->isNotEmpty()
+                    && ! $dayExported->every(fn (SalesVisit $visit): bool => $visit->verification_status === VerificationStatus::REJECTED)) {
+                    continue;
+                }
+
+                if (! $includeUnverified && $nonCancelled->contains(fn (SalesVisit $visit): bool => $visit->verification_status === VerificationStatus::PENDING_REVIEW
+                    || $visit->visit_status === VisitStatus::IN_PROGRESS)) {
+                    continue;
+                }
+
+                $schedule = $schedulesByUserDate->get($key);
+                $dayHolidays = $holidaysByDate->get($dateStr, Collection::empty());
+                $hasHoliday = $dayHolidays->contains(
+                    fn (Holiday $holiday): bool => $holiday->location_id === null
+                        || $holiday->location_id === $user->office_location_id
+                );
+                $isEffectiveWorkDay = $this->balanceService->isEffectiveWorkDayFrom($user, $dateStr, $hasHoliday, $schedule);
+                $isGantiHari = $schedule !== null
+                    && $schedule->source === ScheduleSource::MANUAL_OVERRIDE
+                    && $schedule->is_day_off;
+                $isCollectiveLeave = $dayHolidays->contains(
+                    fn (Holiday $holiday): bool => $holiday->holiday_type === HolidayType::COLLECTIVE_LEAVE
+                );
+
+                /** @var LeaveRequestDay|null $leaveDay */
+                $leaveDay = $leaveDaysByUserDate->get($key);
+                /** @var LeaveRequest|null $leave */
+                $leave = $leaveDay?->leaveRequest;
+
+                $shiftName = 'MKT';
+                $shiftCode = 'MKT';
+                $shiftLabel = 'MKT';
+
+                if ($leave !== null) {
+                    $type = 'Time Off';
+                    $description = match ($leave->type) {
+                        LeaveType::CUTI => 'Cuti Tahunan ('.(string) ($mappings['timeoff_annual'] ?? 'CT').')',
+                        LeaveType::IZIN => 'Izin ('.(string) ($mappings['timeoff_izin'] ?? 'IZ').')',
+                        LeaveType::SAKIT => 'Sakit ('.(string) ($mappings['timeoff_sakit'] ?? 'SK').')',
+                        LeaveType::DINAS_LUAR => 'Dinas Luar',
+                    };
+                    $statusLabel = 'Approved';
+                } elseif ($isCollectiveLeave) {
+                    $type = 'Time Off';
+                    $description = 'Cuti Bersama ('.(string) ($mappings['timeoff_collective'] ?? 'CB').')';
+                    $statusLabel = 'Approved';
+                } elseif (! $isEffectiveWorkDay) {
+                    $type = 'Day Off';
+                    $shiftName = 'dayoff';
+                    $shiftCode = 'dayoff';
+                    $shiftLabel = 'dayoff';
+                    $description = $isGantiHari ? 'Libur (Ganti Hari)' : 'Libur Nasional/Mingguan';
+                    $statusLabel = 'Approved';
+                } elseif ($dateStr < ($todayLocalByUser[$user->id] ?? $dateStr)) {
+                    $allRejected = $nonCancelled->isNotEmpty()
+                        && $nonCancelled->every(fn (SalesVisit $visit): bool => $visit->verification_status === VerificationStatus::REJECTED);
+                    $type = 'Absent';
+                    $description = $allRejected
+                        ? "Alpa - Ditolak HR ({$absentCode})"
+                        : "Alpa ({$absentCode})";
+                    $statusLabel = $allRejected ? 'Rejected' : 'Absent';
+                } else {
+                    continue;
+                }
+
                 $rows[] = [
-                    $localIn->format('Y-m-d'), $localIn->format('H:i:s'), 'Clock In',
-                    $visit->user->nik, $visit->user->name, $visit->user->job_position ?? '',
-                    '', '', 'MKT', 'MKT', 'MKT',
-                    $visit->outletLocation->name, $visit->outletLocation->name, $visit->outletLocation->address,
-                    $coord, $visit->outletLocation->name, $flag, $statusLabel,
+                    $dateStr, '00:00:00', $type,
+                    $user->nik, $user->name, $user->job_position ?? '',
+                    '', '',
+                    $shiftName, $shiftCode, $shiftLabel,
+                    $user->officeLocation->name, $user->officeLocation->name, $user->officeLocation->address,
+                    '',
+                    $description, 'System', $statusLabel,
                 ];
             }
 
-            if ($visit->visit_out_at !== null) {
-                $localOut = $visit->visit_out_at->setTimezone($tz);
-                $outCoord = ($visit->visit_out_lat !== null && $visit->visit_out_lng !== null)
-                    ? "{$visit->visit_out_lat},{$visit->visit_out_lng}"
+            /** @var Collection<int, SalesVisit> $dayExportRows */
+            $dayExportRows = $exportedByDate->get($dateStr, Collection::empty());
+
+            foreach ($dayExportRows as $visit) {
+                $tz = $visit->outletLocation->timezone;
+                $coord = ($visit->visit_in_lat !== null && $visit->visit_in_lng !== null)
+                    ? "{$visit->visit_in_lat},{$visit->visit_in_lng}"
                     : '';
-                $rows[] = [
-                    $localOut->format('Y-m-d'), $localOut->format('H:i:s'), 'Clock Out',
-                    $visit->user->nik, $visit->user->name, $visit->user->job_position ?? '',
-                    '', '', 'MKT', 'MKT', 'MKT',
-                    $visit->outletLocation->name, $visit->outletLocation->name, $visit->outletLocation->address,
-                    $outCoord, trim($visit->outletLocation->name.' - '.($visit->visit_notes ?? '')), $flag, $statusLabel,
-                ];
+                $flag = $visit->source->value === 'MANUAL_HR' ? 'Manual HR' : 'Mobile App';
+                $statusLabel = match ($visit->verification_status) {
+                    VerificationStatus::AUTO_APPROVED, VerificationStatus::APPROVED => 'Approved',
+                    VerificationStatus::PENDING_REVIEW => 'Pending',
+                    VerificationStatus::REJECTED => 'Rejected',
+                };
+
+                if ($visit->visit_in_at !== null) {
+                    $localIn = $visit->visit_in_at->setTimezone($tz);
+                    $rows[] = [
+                        $localIn->format('Y-m-d'), $localIn->format('H:i:s'), 'Clock In',
+                        $visit->user->nik, $visit->user->name, $visit->user->job_position ?? '',
+                        '', '', 'MKT', 'MKT', 'MKT',
+                        $visit->outletLocation->name, $visit->outletLocation->name, $visit->outletLocation->address,
+                        $coord, $visit->outletLocation->name, $flag, $statusLabel,
+                    ];
+                }
+
+                if ($visit->visit_out_at !== null) {
+                    $localOut = $visit->visit_out_at->setTimezone($tz);
+                    $outCoord = ($visit->visit_out_lat !== null && $visit->visit_out_lng !== null)
+                        ? "{$visit->visit_out_lat},{$visit->visit_out_lng}"
+                        : '';
+                    $rows[] = [
+                        $localOut->format('Y-m-d'), $localOut->format('H:i:s'), 'Clock Out',
+                        $visit->user->nik, $visit->user->name, $visit->user->job_position ?? '',
+                        '', '', 'MKT', 'MKT', 'MKT',
+                        $visit->outletLocation->name, $visit->outletLocation->name, $visit->outletLocation->address,
+                        $outCoord, trim($visit->outletLocation->name.' - '.($visit->visit_notes ?? '')), $flag, $statusLabel,
+                    ];
+                }
             }
+
+            $cursor = $cursor->addDay();
         }
 
         $this->audit->log(
@@ -329,15 +566,15 @@ class ExportController extends Controller
             entity: 'sales_visits',
             recordId: 0,
             action: AuditAction::EXPORT_ATTENDANCE,
-            newValues: ['file' => 'sales_visits', 'start_date' => $start->toDateString(), 'end_date' => $end->toDateString()],
+            newValues: ['file' => 'sales_visits', 'start_date' => $start->toDateString(), 'end_date' => $end->toDateString(), 'format' => $format],
         );
 
-        return $this->streamCsv('sales-visits-'.$start->toDateString().'.csv', $headers, $rows);
+        return $this->downloadReport('sales-visits-'.$start->toDateString(), 'Worksheet', $headers, $rows, $format);
     }
 
-    public function auditInternal(Request $request): StreamedResponse
+    public function auditInternal(Request $request): StreamedResponse|BinaryFileResponse
     {
-        [$start, $end, $actor] = $this->validateExportRange($request);
+        [$start, $end, $actor, $format] = $this->validateExportRange($request);
         $startDate = $start->toDateString();
         $endDate = $end->toDateString();
 
@@ -351,7 +588,6 @@ class ExportController extends Controller
 
         $users = User::query()
             ->with('officeLocation:id,name,timezone,work_days')
-            ->where('is_active', true)
             ->orderBy('name')
             ->get();
         $userIds = $users->pluck('id');
@@ -404,6 +640,11 @@ class ExportController extends Controller
             $dayHolidays = $holidaysByDate->get($dateStr, Collection::empty());
 
             foreach ($users as $user) {
+                if ($dateStr < $user->join_date->toDateString()
+                    || ($user->deactivated_at !== null && $dateStr > $user->deactivated_at->toDateString())) {
+                    continue;
+                }
+
                 $timezone = $user->officeLocation->timezone;
                 $todayLocal = CarbonImmutable::now('UTC')->setTimezone($timezone)->toDateString();
                 $key = $user->id.'|'.$dateStr;
@@ -556,14 +797,14 @@ class ExportController extends Controller
             entity: 'audit_logs',
             recordId: 0,
             action: AuditAction::EXPORT_ATTENDANCE,
-            newValues: ['file' => 'audit_internal', 'start_date' => $startDate, 'end_date' => $endDate],
+            newValues: ['file' => 'audit_internal', 'start_date' => $startDate, 'end_date' => $endDate, 'format' => $format],
         );
 
-        return $this->streamCsv('audit-internal-'.$startDate.'.csv', $headers, $rows);
+        return $this->downloadReport('audit-internal-'.$startDate, 'Audit Internal', $headers, $rows, $format);
     }
 
     /**
-     * @return array{0: CarbonImmutable, 1: CarbonImmutable, 2: User}
+     * @return array{0: CarbonImmutable, 1: CarbonImmutable, 2: User, 3: string}
      */
     private function validateExportRange(Request $request): array
     {
@@ -573,6 +814,7 @@ class ExportController extends Controller
         $validated = $request->validate([
             'start_date' => ['required', 'date'],
             'end_date' => ['required', 'date', 'after_or_equal:start_date'],
+            'format' => ['nullable', 'in:csv,xlsx'],
         ]);
 
         $start = CarbonImmutable::parse((string) $validated['start_date'])->startOfDay();
@@ -584,7 +826,38 @@ class ExportController extends Controller
             ]);
         }
 
-        return [$start, $end, $actor];
+        return [$start, $end, $actor, (string) ($validated['format'] ?? 'csv')];
+    }
+
+    /**
+     * @param  list<string>  $headers
+     * @param  list<list<string>>  $rows
+     */
+    private function downloadReport(string $baseFilename, string $sheetTitle, array $headers, array $rows, string $format): StreamedResponse|BinaryFileResponse
+    {
+        $rows = $this->sanitizeRows($rows);
+
+        if ($format === 'xlsx') {
+            return Excel::download(
+                new TabularReportExport($sheetTitle, $headers, $rows),
+                "{$baseFilename}.xlsx",
+                ExcelFormat::XLSX,
+            );
+        }
+
+        return $this->streamCsv("{$baseFilename}.csv", $headers, $rows);
+    }
+
+    /**
+     * @param  list<list<string>>  $rows
+     * @return list<list<string>>
+     */
+    private function sanitizeRows(array $rows): array
+    {
+        return array_map(
+            fn (array $row): array => array_map(fn (string $cell): string => $this->sanitizer->sanitizeCell($cell), $row),
+            $rows,
+        );
     }
 
     /**
@@ -599,8 +872,8 @@ class ExportController extends Controller
                 return;
             }
             fputcsv($out, $headers);
-            foreach ($rows as $row) {
-                fputcsv($out, array_map(fn (string $cell): string => $this->sanitizer->sanitizeCell($cell), $row));
+            foreach ($this->sanitizeRows($rows) as $row) {
+                fputcsv($out, $row);
             }
             fclose($out);
         }, $filename, [

@@ -29,9 +29,12 @@ use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Throwable;
 
 class SalesVisitController extends Controller
 {
+    private const MAX_CANCELS_PER_DAY = 3;
+
     public function __construct(
         private readonly GeoLocationService $geo,
         private readonly ScheduleResolverService $scheduleResolver,
@@ -79,31 +82,81 @@ class SalesVisitController extends Controller
             ->map(fn (Location $loc): array => $this->serializeOutlet($loc, null))
             ->values();
 
+        $cancelledTodayCount = SalesVisit::query()
+            ->where('user_id', $user->id)
+            ->whereDate('visit_date', $todayBranch)
+            ->where('visit_status', VisitStatus::CANCELLED)
+            ->count();
+
+        $cancelRemainingToday = max(0, self::MAX_CANCELS_PER_DAY - $cancelledTodayCount);
+
         $todayVisits = SalesVisit::query()
             ->with(['outletLocation', 'activityCategory'])
             ->where('user_id', $user->id)
             ->whereDate('visit_date', $todayBranch)
             ->orderBy('visit_in_at')
-            ->get();
+            ->get()
+            ->map(fn (SalesVisit $visit): array => [
+                'id' => $visit->id,
+                'outlet_name' => $visit->outletLocation->name,
+                'outlet_code' => $visit->outletLocation->code,
+                'outlet_address' => $visit->outletLocation->address,
+                'outlet_timezone' => $visit->outletLocation->timezone,
+                'visit_in_time' => $visit->visit_in_at?->setTimezone($visit->outletLocation->timezone)->format('H:i'),
+                'visit_out_time' => $visit->visit_out_at?->setTimezone($visit->outletLocation->timezone)->format('H:i'),
+                'duration_minutes' => $visit->duration_minutes,
+                'activity_category_name' => $visit->activityCategory?->name,
+                'visit_notes' => $visit->visit_notes,
+                'visit_in_notes' => $visit->visit_in_notes,
+                'cancel_reason' => $visit->cancel_reason,
+                'visit_status' => $visit->visit_status->value,
+                'verification_status' => $visit->verification_status->value,
+                'source' => $visit->source->value,
+                'reject_reason' => $visit->reject_reason,
+            ])
+            ->values();
 
         $categories = ActivityCategory::query()
             ->where('is_active', true)
             ->orderBy('name')
             ->get(['id', 'name', 'exempt_short_duration']);
 
+        $rejectedOutlets = Location::query()
+            ->where('type', LocationType::OUTLET)
+            ->where('created_by', $user->id)
+            ->where('status', LocationStatus::INACTIVE)
+            ->latest('updated_at')
+            ->limit(5)
+            ->get()
+            ->map(fn (Location $loc): array => [
+                'id' => $loc->id,
+                'name' => $loc->name,
+                'address' => $loc->address,
+                'reject_reason' => $loc->reject_reason,
+            ])
+            ->values();
+
         return Inertia::render('sales/Kunjungan', [
             'homeTimezone' => $homeOffice->timezone,
             'todayDate' => $todayBranch,
+            'serverTimeIso' => $nowUtc->toIso8601String(),
             'hasApprovedTimeOff' => $this->scheduleResolver->hasApprovedTimeOff($user->id, $todayBranch),
+            'rejectedOutlets' => $rejectedOutlets,
             'activeVisit' => $activeVisit !== null ? [
                 'id' => $activeVisit->id,
                 'outlet_name' => $activeVisit->outletLocation->name,
                 'outlet_code' => $activeVisit->outletLocation->code,
                 'outlet_address' => $activeVisit->outletLocation->address,
                 'outlet_radius_m' => $activeVisit->outletLocation->radius_m,
+                'outlet_timezone' => $activeVisit->outletLocation->timezone,
                 'visit_in_at' => $activeVisit->visit_in_at?->toIso8601String(),
+                'visit_in_time' => $activeVisit->visit_in_at?->setTimezone($activeVisit->outletLocation->timezone)->format('H:i'),
                 'verification_status' => $activeVisit->verification_status->value,
-                'can_cancel' => $activeVisit->visit_in_at !== null && $activeVisit->visit_in_at->diffInSeconds($nowUtc) <= 300,
+                'reject_reason' => $activeVisit->reject_reason,
+                'can_cancel' => $cancelRemainingToday > 0
+                    && $activeVisit->visit_in_at !== null
+                    && $activeVisit->visit_in_at->diffInSeconds($nowUtc) <= 300,
+                'cancel_remaining_today' => $cancelRemainingToday,
             ] : null,
             'recentOutlets' => $recentOutlets,
             'todayVisits' => $todayVisits,
@@ -187,10 +240,14 @@ class SalesVisitController extends Controller
             ]);
         }
 
+        // created_at is UTC; the daily quota must follow the branch's calendar day.
+        $dayStartUtc = CarbonImmutable::parse($todayBranch, $homeOffice->timezone)->startOfDay()->utc();
+        $dayEndUtc = CarbonImmutable::parse($todayBranch, $homeOffice->timezone)->endOfDay()->utc();
+
         $todayNooCount = Location::query()
             ->where('type', LocationType::OUTLET)
             ->where('created_by', $user->id)
-            ->whereDate('created_at', $todayBranch)
+            ->whereBetween('created_at', [$dayStartUtc, $dayEndUtc])
             ->count();
 
         if ($todayNooCount >= 5) {
@@ -204,13 +261,7 @@ class SalesVisitController extends Controller
 
         $nearby = Location::query()
             ->where('type', LocationType::OUTLET)
-            ->where(function ($query) use ($user): void {
-                $query->where('status', LocationStatus::ACTIVE)
-                    ->orWhere(function ($sub) use ($user): void {
-                        $sub->where('status', LocationStatus::PENDING_VERIFICATION)
-                            ->where('created_by', $user->id);
-                    });
-            })
+            ->whereIn('status', [LocationStatus::ACTIVE, LocationStatus::PENDING_VERIFICATION])
             ->get()
             ->map(function (Location $loc) use ($lat, $lng): array {
                 $distance = $this->geo->haversineMeters($lat, $lng, (float) $loc->latitude, (float) $loc->longitude);
@@ -324,9 +375,9 @@ class SalesVisitController extends Controller
         $isUnverifiedOutlet = $outlet->status === LocationStatus::PENDING_VERIFICATION;
         $notes = trim((string) ($validated['notes'] ?? ''));
 
-        if (($geoEval['requires_notes'] || $isUnverifiedOutlet) && $notes === '') {
+        if (($geoEval['requires_notes'] || $isUnverifiedOutlet) && mb_strlen($notes) < 10) {
             throw ValidationException::withMessages([
-                'notes' => ['Alasan Visit In wajib diisi untuk toko NOO, luar radius, atau akurasi GPS rendah.'],
+                'notes' => ['Alasan Visit In wajib diisi minimal 10 karakter untuk toko NOO, luar radius, atau akurasi GPS rendah.'],
             ]);
         }
 
@@ -369,6 +420,8 @@ class SalesVisitController extends Controller
             accuracyM: $accuracyM,
             serverTime: $nowUtc,
             timezone: $outlet->timezone,
+            employeeName: $user->name,
+            distanceM: $distanceM,
         );
 
         try {
@@ -409,6 +462,9 @@ class SalesVisitController extends Controller
                 return SalesVisit::query()->create([
                     'user_id' => $user->id,
                     'outlet_location_id' => $outlet->id,
+                    'outlet_lat' => $outlet->latitude,
+                    'outlet_lng' => $outlet->longitude,
+                    'outlet_radius_m' => $outlet->radius_m,
                     'source' => AttendanceSource::APP,
                     'visit_date' => $visitDate,
                     'visit_in_at' => $nowUtc,
@@ -435,9 +491,18 @@ class SalesVisitController extends Controller
                     ->first();
 
                 if ($replayed !== null) {
+                    $this->imageEvidence->delete($photoPath);
+
                     return response()->json(['visit' => $replayed, 'idempotent_replay' => true]);
                 }
             }
+
+            $this->imageEvidence->delete($photoPath);
+
+            throw $e;
+        } catch (Throwable $e) {
+            $this->imageEvidence->delete($photoPath);
+
             throw $e;
         }
 
@@ -454,7 +519,7 @@ class SalesVisitController extends Controller
         }
 
         $validated = $request->validate([
-            'cancel_reason' => ['required', 'string', 'min:3', 'max:255'],
+            'cancel_reason' => ['required', 'string', 'min:10', 'max:255'],
         ]);
 
         if ($visit->visit_status !== VisitStatus::IN_PROGRESS || $visit->visit_out_at !== null) {
@@ -475,9 +540,12 @@ class SalesVisitController extends Controller
             ->where('visit_status', VisitStatus::CANCELLED)
             ->count();
 
-        if ($cancelledToday >= 3) {
+        if ($cancelledToday >= self::MAX_CANCELS_PER_DAY) {
             throw ValidationException::withMessages([
-                'visit' => ['Batas pembatalan Visit In maksimal 3 kali per hari telah tercapai.'],
+                'visit' => [sprintf(
+                    'Batas pembatalan Visit In maksimal %d kali per hari telah tercapai.',
+                    self::MAX_CANCELS_PER_DAY,
+                )],
             ]);
         }
 
@@ -530,6 +598,10 @@ class SalesVisitController extends Controller
 
         /** @var Location $outlet */
         $outlet = $visit->outletLocation;
+        // Snapshot from Visit In wins: HR may later edit outlet coords/radius, history must stay truthful.
+        $outletLat = $visit->outlet_lat !== null ? (float) $visit->outlet_lat : (float) $outlet->latitude;
+        $outletLng = $visit->outlet_lng !== null ? (float) $visit->outlet_lng : (float) $outlet->longitude;
+        $outletRadiusM = $visit->outlet_radius_m ?? $outlet->radius_m;
         /** @var ActivityCategory $category */
         $category = ActivityCategory::query()->findOrFail((int) $validated['activity_category_id']);
 
@@ -538,16 +610,26 @@ class SalesVisitController extends Controller
         $lat = (float) $validated['lat'];
         $lng = (float) $validated['lng'];
         $accuracyM = (float) $validated['accuracy_m'];
-        $distanceM = $this->geo->haversineMeters($lat, $lng, (float) $outlet->latitude, (float) $outlet->longitude);
+        $distanceM = $this->geo->haversineMeters($lat, $lng, $outletLat, $outletLng);
 
         $geoEval = $this->geo->evaluate(
             distanceM: $distanceM,
             accuracyM: $accuracyM,
-            radiusM: $outlet->radius_m,
+            radiusM: $outletRadiusM,
             isEntryPhase: false,
             bypassRadius: false,
             isVisitOut: true,
         );
+
+        $notesRequired = $geoEval['requires_notes'] || in_array('OUT_OF_RADIUS', $geoEval['flags'], true)
+            || in_array('UNCERTAIN_ACCURACY', $geoEval['flags'], true)
+            || in_array('LOW_ACCURACY', $geoEval['flags'], true);
+
+        if ($notesRequired && mb_strlen(trim((string) $validated['visit_notes'])) < 10) {
+            throw ValidationException::withMessages([
+                'visit_notes' => ['Catatan Visit Out wajib diisi minimal 10 karakter karena di luar radius atau akurasi GPS rendah.'],
+            ]);
+        }
 
         $gpsTokenResult = $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
 
@@ -560,7 +642,7 @@ class SalesVisitController extends Controller
             accuracyM: $accuracyM,
             nowUtc: $nowUtc,
             deviceId: $deviceId,
-            isInsideRadius: $distanceM <= $outlet->radius_m,
+            isInsideRadius: $distanceM <= $outletRadiusM,
             isStaleTimestamp: $gpsTokenResult['stale'],
             currentOutletId: $outlet->id,
         );

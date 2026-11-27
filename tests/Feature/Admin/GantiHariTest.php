@@ -62,7 +62,9 @@ test('office ganti hari requires a valid origin and cannot reuse it', function (
         ->firstOrFail();
     expect($schedule->is_day_off)->toBeTrue()
         ->and($schedule->source)->toBe(ScheduleSource::MANUAL_OVERRIDE)
-        ->and($schedule->replacement_for_date?->toDateString())->toBe('2026-11-22')
+        ->and($schedule->compensation_source_date?->toDateString())->toBe('2026-11-22')
+        ->and($schedule->compensation_source_type)->toBe('ATTENDANCE_LOG')
+        ->and($schedule->compensation_source_id)->not->toBeNull()
         ->and($schedule->notes)->toBe('Ganti hari libur 22 November');
 
     $this->actingAs($hr)
@@ -120,7 +122,7 @@ test('sales ganti hari accepts an approved off-day visit as origin', function ()
     expect(UserShiftSchedule::query()
         ->where('user_id', $sales->id)
         ->whereDate('work_date', '2026-11-30')
-        ->whereDate('replacement_for_date', '2026-11-22')
+        ->whereDate('compensation_source_date', '2026-11-22')
         ->exists())->toBeTrue();
 
     CarbonImmutable::setTestNow();

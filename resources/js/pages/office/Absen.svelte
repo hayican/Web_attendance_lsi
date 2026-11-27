@@ -620,19 +620,18 @@
         submitting = true;
 
         try {
-            const fresh = await requestFreshGps(office.radius_m);
-            gps = fresh;
+            // PRD v8: token is issued on the initial fix or manual refresh only, so STALE_TIMESTAMP stays meaningful.
+            const fresh = gps;
 
             if (
+                fresh === null ||
                 fresh.gpsSessionToken === null ||
                 fresh.lat === null ||
                 fresh.lng === null
             ) {
                 feedback = {
                     type: 'error',
-                    message:
-                        fresh.message ??
-                        'Lokasi GPS belum siap. Tekan Muat Ulang GPS.',
+                    message: 'Lokasi GPS belum siap. Tekan Muat Ulang GPS.',
                 };
                 return;
             }

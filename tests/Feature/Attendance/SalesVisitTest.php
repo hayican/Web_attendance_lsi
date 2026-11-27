@@ -70,6 +70,134 @@ test('sales visit page uses sales-specific component', function () {
         );
 });
 
+test('sales visit page exposes safe visit summaries and remaining cancel quota', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 08:02:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create([
+        'type' => LocationType::OFFICE,
+        'timezone' => 'Asia/Jakarta',
+    ]);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $outlet = Location::factory()->create([
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::ACTIVE,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+        'timezone' => 'Asia/Jakarta',
+    ]);
+    $category = ActivityCategory::query()->create([
+        'name' => 'Cek Stok',
+        'exempt_short_duration' => false,
+        'is_active' => true,
+    ]);
+
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 06:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::CANCELLED,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+        'cancel_reason' => 'Salah pilih toko',
+    ]);
+
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 07:00:00', 'Asia/Jakarta')->utc(),
+        'visit_out_at' => CarbonImmutable::parse('2026-11-23 07:30:00', 'Asia/Jakarta')->utc(),
+        'duration_minutes' => 30,
+        'activity_category_id' => $category->id,
+        'visit_notes' => 'Stok aman',
+        'visit_status' => VisitStatus::COMPLETED,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+    ]);
+
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 08:00:00', 'Asia/Jakarta')->utc(),
+        'visit_in_photo_url' => 'evidence/sales/secret.jpg',
+        'visit_in_lat' => -6.2000000,
+        'visit_in_lng' => 106.8166667,
+        'visit_in_accuracy_m' => 10.5,
+        'visit_in_distance_m' => 12.3,
+        'visit_in_device_id' => 'device-secret',
+        'visit_in_ip' => '10.10.10.10',
+        'visit_in_user_agent' => 'secret-agent',
+        'visit_in_idempotency_key' => (string) Str::uuid(),
+        'visit_status' => VisitStatus::IN_PROGRESS,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+    ]);
+
+    $this->actingAs($sales)
+        ->get('/attendance/sales')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('sales/Kunjungan')
+            ->where('serverTimeIso', '2026-11-23T01:02:00+00:00')
+            ->where('activeVisit.outlet_timezone', 'Asia/Jakarta')
+            ->where('activeVisit.visit_in_time', '08:00')
+            ->where('activeVisit.cancel_remaining_today', 2)
+            ->where('activeVisit.can_cancel', true)
+            ->missing('activeVisit.visit_in_lat')
+            ->missing('activeVisit.visit_in_photo_url')
+            ->missing('activeVisit.visit_in_device_id')
+            ->has('todayVisits', 3)
+            ->where('todayVisits.0.visit_in_time', '06:00')
+            ->where('todayVisits.1.visit_in_time', '07:00')
+            ->where('todayVisits.2.visit_in_time', '08:00')
+            ->where('todayVisits.1.duration_minutes', 30)
+            ->where('todayVisits.2.visit_status', VisitStatus::IN_PROGRESS->value)
+            ->missing('todayVisits.0.outletLocation')
+            ->missing('todayVisits.0.outlet_location')
+            ->missing('todayVisits.0.visit_in_lat')
+            ->missing('todayVisits.0.visit_in_lng')
+            ->missing('todayVisits.0.visit_in_device_id')
+            ->missing('todayVisits.0.visit_in_ip')
+            ->missing('todayVisits.0.visit_in_user_agent')
+            ->missing('todayVisits.0.visit_in_idempotency_key')
+            ->missing('todayVisits.0.visit_in_photo_url')
+            ->missing('todayVisits.2.visit_in_lat')
+            ->missing('todayVisits.2.visit_in_lng')
+            ->missing('todayVisits.2.visit_in_device_id')
+            ->missing('todayVisits.2.visit_in_ip')
+            ->missing('todayVisits.2.visit_in_user_agent')
+            ->missing('todayVisits.2.visit_in_idempotency_key')
+            ->missing('todayVisits.2.visit_in_photo_url')
+        );
+
+    foreach (['2026-11-23 05:00:00', '2026-11-23 05:30:00'] as $cancelledAt) {
+        SalesVisit::query()->create([
+            'user_id' => $sales->id,
+            'outlet_location_id' => $outlet->id,
+            'visit_date' => '2026-11-23',
+            'visit_in_at' => CarbonImmutable::parse($cancelledAt, 'Asia/Jakarta')->utc(),
+            'visit_status' => VisitStatus::CANCELLED,
+            'verification_status' => VerificationStatus::AUTO_APPROVED,
+            'cancel_reason' => 'Salah pilih toko',
+        ]);
+    }
+
+    $this->actingAs($sales)
+        ->get('/attendance/sales')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('sales/Kunjungan')
+            ->where('activeVisit.cancel_remaining_today', 0)
+            ->where('activeVisit.can_cancel', false)
+        );
+
+    CarbonImmutable::setTestNow();
+});
+
 test('sales NOO requires <= 50m GPS accuracy and enforces duplicate warning', function () {
     $office = Location::factory()->create(['type' => LocationType::OFFICE]);
     $sales = User::factory()->create([
@@ -110,6 +238,79 @@ test('sales NOO requires <= 50m GPS accuracy and enforces duplicate warning', fu
         'accuracy_m' => 12,
         'confirm_duplicate' => true,
     ])->assertCreated()->assertJsonPath('outlet.status', LocationStatus::PENDING_VERIFICATION->value);
+});
+
+test('sales NOO duplicate check covers pending outlets submitted by other sales', function () {
+    $office = Location::factory()->create(['type' => LocationType::OFFICE]);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $otherSales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    Location::factory()->create([
+        'name' => 'Toko Pending Sales Lain',
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'status' => LocationStatus::PENDING_VERIFICATION,
+        'created_by' => $otherSales->id,
+    ]);
+
+    $this->actingAs($sales)->postJson('/attendance/sales/noo', [
+        'name' => 'Toko Baru',
+        'address' => 'Jl. Baru',
+        'lat' => -6.2000300,
+        'lng' => 106.8166800,
+        'accuracy_m' => 12,
+    ])->assertStatus(409)
+        ->assertJsonPath('duplicate_warning', true)
+        ->assertJsonPath('nearby_outlets.0.name', 'Toko Pending Sales Lain');
+});
+
+test('sales visit page lists own rejected NOO outlets with the rejection reason', function () {
+    $office = Location::factory()->create(['type' => LocationType::OFFICE]);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $otherSales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    Location::factory()->create([
+        'name' => 'Toko Ditolak Sendiri',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::INACTIVE,
+        'reject_reason' => 'Duplikat toko eksisting',
+        'created_by' => $sales->id,
+    ]);
+
+    Location::factory()->create([
+        'name' => 'Toko Ditolak Sales Lain',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::INACTIVE,
+        'reject_reason' => 'Alasan sales lain',
+        'created_by' => $otherSales->id,
+    ]);
+
+    $this->actingAs($sales)
+        ->get('/attendance/sales')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('sales/Kunjungan')
+            ->has('rejectedOutlets', 1)
+            ->where('rejectedOutlets.0.name', 'Toko Ditolak Sendiri')
+            ->where('rejectedOutlets.0.reject_reason', 'Duplikat toko eksisting')
+        );
 });
 
 test('sales visit-in with selfie, single in-progress lock, cancel <= 5m, and photo-less visit-out with SHORT_DURATION vs exempt category', function () {
@@ -308,6 +509,38 @@ test('sales visit on a manual day off adds OFF_DAY_ATTENDANCE', function () {
         ->assertJsonPath('visit.verification_status', VerificationStatus::PENDING_REVIEW->value);
 
     expect($res->json('visit.anomaly_flags'))->toContain('OFF_DAY_ATTENDANCE');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales NOO daily quota follows the branch calendar day, not the UTC date', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-24 01:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    // 00:10-00:50 WIB is still the previous UTC date; these five must count as today.
+    foreach (range(0, 4) as $i) {
+        Location::factory()->create([
+            'type' => LocationType::OUTLET,
+            'status' => LocationStatus::ACTIVE,
+            'created_by' => $sales->id,
+            'created_at' => CarbonImmutable::parse('2026-11-24 00:10:00', 'Asia/Jakarta')->addMinutes($i * 10)->utc(),
+        ]);
+    }
+
+    $this->actingAs($sales)->postJson('/attendance/sales/noo', [
+        'name' => 'Toko Keenam',
+        'address' => 'Jl. Keenam',
+        'lat' => -6.2000000,
+        'lng' => 106.8166667,
+        'accuracy_m' => 10,
+        'confirm_duplicate' => true,
+    ])->assertUnprocessable()->assertJsonValidationErrors('noo');
 
     CarbonImmutable::setTestNow();
 });

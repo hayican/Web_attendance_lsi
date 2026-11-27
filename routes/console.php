@@ -12,3 +12,4 @@ Schedule::command('attendance:close-missed')->everyFifteenMinutes()->withoutOver
 Schedule::command('attendance:generate-schedules')->monthlyOn(1, '00:10')->timezone('Asia/Jakarta')->withoutOverlapping();
 Schedule::command('leave:annual-maintenance')->dailyAt('00:05')->timezone('Asia/Jakarta')->withoutOverlapping();
 Schedule::command('attendance:prune-retention')->dailyAt('02:00')->timezone('Asia/Jakarta')->withoutOverlapping();
+Schedule::command('evidence:prune-orphans')->dailyAt('03:00')->timezone('Asia/Jakarta')->withoutOverlapping();

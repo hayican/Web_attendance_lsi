@@ -147,6 +147,7 @@
     let exportStart = $state('');
     let exportEnd = $state('');
     let includeUnverifiedSales = $state(false);
+    let exportFormat = $state<'xlsx' | 'csv'>('xlsx');
     let correctTarget = $state<RecapRow | null>(null);
     let correctReason = $state('');
     let gpsState = $state<FreshGpsResult | null>(null);
@@ -401,19 +402,43 @@
         }
     }
 
+    async function saveResponse(res: Response) {
+        if (!res.ok) {
+            feedback = 'Unduhan gagal. Coba lagi.';
+            return;
+        }
+
+        const disposition = res.headers.get('Content-Disposition') ?? '';
+        const filename =
+            /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)?.[1] ??
+            `export.${exportFormat}`;
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(await res.blob());
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(link.href);
+    }
+
     async function exportFile(path: string) {
-        let url = `${path}?start_date=${exportStart}&end_date=${exportEnd}`;
+        let url = `${path}?start_date=${exportStart}&end_date=${exportEnd}&format=${exportFormat}`;
         if (path.includes('sales-visits') && includeUnverifiedSales) {
             url += '&include_unverified=1';
         }
-        if (path.includes('talenta-office')) {
+        if (path.includes('talenta-office') || path.includes('sales-visits')) {
             const check = await fetch(url, { credentials: 'same-origin' });
             if (check.status === 409) {
                 const data = (await check.json()) as { message: string };
                 if (!confirm(data.message)) return;
-                window.location.href = `${url}&confirm_pending=1`;
+                await saveResponse(
+                    await fetch(`${url}&confirm_pending=1`, {
+                        credentials: 'same-origin',
+                    }),
+                );
                 return;
             }
+            // Reuse this single response: re-requesting the URL would generate the file twice.
+            await saveResponse(check);
+            return;
         }
         window.location.href = url;
     }
@@ -531,6 +556,14 @@
                         bind:value={exportEnd}
                         class="h-8 w-36 border-white/30 bg-white/95 font-mono text-xs text-stone-900 shadow-xs"
                     />
+                    <select
+                        bind:value={exportFormat}
+                        aria-label="Format ekspor"
+                        class="h-8 cursor-pointer rounded-md border border-white/30 bg-white/95 px-2 text-xs text-stone-900"
+                    >
+                        <option value="xlsx">Excel (.xlsx)</option>
+                        <option value="csv">CSV (.csv)</option>
+                    </select>
                     <Button
                         size="sm"
                         class="h-8 cursor-pointer bg-[#583015] px-2.5 text-xs text-white hover:bg-[#43230e]"

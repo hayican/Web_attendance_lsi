@@ -73,6 +73,10 @@ class HrDashboardController extends Controller
         $users = User::query()
             ->with(['officeLocation:id,name,timezone,work_days,latitude,longitude,radius_m'])
             ->where('is_active', true)
+            ->whereDate('join_date', '<=', $selectedDate)
+            ->where(fn ($query) => $query
+                ->whereNull('deactivated_at')
+                ->orWhereDate('deactivated_at', '>=', $selectedDate))
             ->orderBy('name')
             ->get();
 
@@ -417,7 +421,7 @@ class HrDashboardController extends Controller
             if ($decision === VerificationStatus::REJECTED) {
                 $updates['is_active_attempt'] = null;
             }
-            $attendanceLog->update($updates);
+            $this->applyAttendanceReview($attendanceLog, $updates);
         } else {
             $updates = [
                 'clock_out_status' => $decision,
@@ -428,15 +432,22 @@ class HrDashboardController extends Controller
             if ($decision === VerificationStatus::APPROVED && $attendanceLog->clock_out_at === null) {
                 if (! empty($validated['clock_out_at'])) {
                     $updates['clock_out_at'] = CarbonImmutable::parse((string) $validated['clock_out_at'])->utc();
-                } elseif ($attendanceLog->shift !== null) {
+                } else {
+                    // PRD v8: default to effective_end_time (covers day-off / no-shift rows too).
                     $tz = $attendanceLog->location->timezone;
-                    $updates['clock_out_at'] = CarbonImmutable::parse(
-                        "{$attendanceLog->work_date->toDateString()} {$attendanceLog->shift->end_time}",
-                        $tz
-                    )->utc();
+                    $effectiveEnd = $this->scheduleResolver->effectiveEndTime(
+                        $attendanceLog->work_date->toDateString(),
+                        $tz,
+                        $attendanceLog->shift,
+                        $attendanceLog->leaveRequest,
+                    );
+
+                    if ($effectiveEnd !== null) {
+                        $updates['clock_out_at'] = $effectiveEnd->utc();
+                    }
                 }
             }
-            $attendanceLog->update($updates);
+            $this->applyAttendanceReview($attendanceLog, $updates);
         }
 
         if ($decision === VerificationStatus::REJECTED) {
@@ -489,14 +500,14 @@ class HrDashboardController extends Controller
                 ], 409);
             }
 
-            $attendanceLog->update([
+            $this->applyAttendanceReview($attendanceLog, [
                 'clock_in_status' => VerificationStatus::APPROVED,
                 'is_active_attempt' => 1,
                 'clock_in_reviewed_by' => $actor->id,
                 'clock_in_reviewed_at' => now('UTC'),
-            ]);
+            ], cancelPendingLeave: true);
         } else {
-            $attendanceLog->update([
+            $this->applyAttendanceReview($attendanceLog, [
                 'clock_out_status' => VerificationStatus::APPROVED,
                 'clock_out_reviewed_by' => $actor->id,
                 'clock_out_reviewed_at' => now('UTC'),
@@ -523,6 +534,12 @@ class HrDashboardController extends Controller
 
         if ($salesVisit->user_id === $actor->id) {
             abort(403, 'Dilarang memverifikasi kunjungan milik sendiri.');
+        }
+
+        if ($salesVisit->visit_status === VisitStatus::IN_PROGRESS) {
+            throw ValidationException::withMessages([
+                'visit' => ['Kunjungan masih berjalan. Tunggu Visit Out sebelum meninjau.'],
+            ]);
         }
 
         $validated = $request->validate([
@@ -553,7 +570,10 @@ class HrDashboardController extends Controller
                 : null;
         }
 
-        $salesVisit->update($updates);
+        DB::transaction(function () use ($salesVisit, $updates): void {
+            $salesVisit->update($updates);
+            $this->syncCollectiveLeaveFor($salesVisit->user, $salesVisit->visit_date->toDateString());
+        });
 
         if ($decision === VerificationStatus::REJECTED) {
             $owner = $salesVisit->user;
@@ -600,6 +620,7 @@ class HrDashboardController extends Controller
                             'clock_in_reviewed_by' => $actor->id,
                             'clock_in_reviewed_at' => now('UTC'),
                         ]);
+                        $this->syncCollectiveLeaveFor($log->user, $log->work_date->toDateString());
                         $approved++;
                     } elseif ($phase === 'clock_out' && $log->clock_out_status === VerificationStatus::PENDING_REVIEW) {
                         $log->update([
@@ -607,6 +628,7 @@ class HrDashboardController extends Controller
                             'clock_out_reviewed_by' => $actor->id,
                             'clock_out_reviewed_at' => now('UTC'),
                         ]);
+                        $this->syncCollectiveLeaveFor($log->user, $log->work_date->toDateString());
                         $approved++;
                     }
                 } else {
@@ -623,6 +645,7 @@ class HrDashboardController extends Controller
                             'reviewed_by' => $actor->id,
                             'reviewed_at' => now('UTC'),
                         ]);
+                        $this->syncCollectiveLeaveFor($visit->user, $visit->visit_date->toDateString());
                         $approved++;
                     }
                 }
@@ -641,6 +664,28 @@ class HrDashboardController extends Controller
         return LeaveRequest::query()
             ->whereKey($log->leave_request_id)
             ->first()?->status === LeaveStatus::PENDING;
+    }
+
+    /** PRD US-008: any HR decision touching a COLLECTIVE_LEAVE date refreshes the yearly deduction. */
+    private function syncCollectiveLeaveFor(User $user, string $date): void
+    {
+        $this->balanceService->syncCollectiveLeaveForYear(CarbonImmutable::parse($date)->year, $user);
+    }
+
+    /**
+     * @param  array<string, mixed>  $updates
+     */
+    private function applyAttendanceReview(AttendanceLog $log, array $updates, bool $cancelPendingLeave = false): void
+    {
+        DB::transaction(function () use ($log, $updates, $cancelPendingLeave): void {
+            if ($cancelPendingLeave) {
+                // PRD US-008: presence wins, so a same-day pending CUTI/IZIN/SAKIT day is cancelled.
+                $this->helper->cancelPendingLeaveDayOnPresence($log->user_id, $log->work_date->toDateString());
+            }
+
+            $log->update($updates);
+            $this->syncCollectiveLeaveFor($log->user, $log->work_date->toDateString());
+        });
     }
 
     public function storeManualAttendance(Request $request): JsonResponse
@@ -722,6 +767,8 @@ class HrDashboardController extends Controller
                 'clock_out_reviewed_by' => $clockOutAt !== null ? $actor->id : null,
                 'clock_out_reviewed_at' => $clockOutAt !== null ? now('UTC') : null,
             ]);
+
+            $this->syncCollectiveLeaveFor($targetUser, $workDate);
 
             $this->audit->log(
                 actorId: $actor->id,

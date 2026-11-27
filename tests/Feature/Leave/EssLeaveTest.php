@@ -170,6 +170,9 @@ test('SAKIT requires SKD, DINAS_LUAR forbidden for sales, monthly > 2 days requi
         ->assertOk()
         ->assertJsonPath('leave_request.status', LeaveStatus::APPROVED->value);
 
+    expect($office->notifications()->latest()->first()?->data['url'] ?? null)
+        ->toBe(route('leave.index', absolute: false));
+
     // Partial cancel 1 day (2026-11-30) -> PARTIALLY_CANCELLED & used_days drops 3 -> 2
     $leave = LeaveRequest::query()->with('days')->findOrFail($leaveId);
     $lastDayId = $leave->days->firstWhere('leave_date', CarbonImmutable::parse('2026-11-30'))?->id;
