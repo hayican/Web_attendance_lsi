@@ -4,6 +4,7 @@ use App\Http\Middleware\EnsureConsentAccepted;
 use App\Http\Middleware\EnsureDeviceCookie;
 use App\Http\Middleware\EnsurePasswordChanged;
 use App\Http\Middleware\EnsureRole;
+use App\Http\Middleware\EnsureSingleSession;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\HandleAppearance;
 use App\Http\Middleware\HandleInertiaRequests;
@@ -24,6 +25,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $middleware->web(append: [
             EnsureDeviceCookie::class,
+            EnsureSingleSession::class,
             HandleAppearance::class,
             HandleInertiaRequests::class,
             AddLinkHeadersForPreloadedAssets::class,

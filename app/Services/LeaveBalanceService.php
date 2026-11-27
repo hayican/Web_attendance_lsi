@@ -127,11 +127,13 @@ class LeaveBalanceService
     /**
      * @return list<array{balance: LeaveBalance, old: float, new: float}>
      */
-    public function syncCollectiveLeaveForYear(int $year): array
+    public function syncCollectiveLeaveForYear(int $year, ?User $only = null): array
     {
         $today = CarbonImmutable::now('Asia/Jakarta');
         $asOf = $year <= $today->year ? $today : null;
-        $users = User::query()->where('is_active', true)->get();
+        $users = $only !== null
+            ? User::query()->whereKey($only->id)->get()
+            : User::query()->where('is_active', true)->get();
         $changes = [];
 
         foreach ($users as $user) {

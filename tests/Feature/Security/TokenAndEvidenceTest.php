@@ -88,6 +88,7 @@ test('image evidence service rejects fake images, watermarks valid photos, and p
         accuracyM: 12.0,
         serverTime: now(),
         timezone: 'Asia/Jakarta',
+        employeeName: $owner->name,
     ))->toThrow(ValidationException::class);
 
     // Real GD-generated image passes and is stored privately
@@ -102,6 +103,8 @@ test('image evidence service rejects fake images, watermarks valid photos, and p
         accuracyM: 12.0,
         serverTime: now(),
         timezone: 'Asia/Jakarta',
+        employeeName: $owner->name,
+        distanceM: 12.0,
     );
 
     Storage::disk('local')->assertExists($path);

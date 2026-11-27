@@ -170,10 +170,11 @@ class LeaveController extends Controller
         }
 
         if (in_array($type, [LeaveType::IZIN, LeaveType::SAKIT], true)) {
+            // PRD v8 counts the H-2 window backwards from end_date, not start_date.
             $minBackdate = $this->findMinBackdateDate($user, $todayLocal, 2);
-            if ($startDate->lessThan($minBackdate)) {
+            if ($endDate->lessThan($minBackdate)) {
                 throw ValidationException::withMessages([
-                    'start_date' => ['Pengajuan susulan (backdate) maksimal H-2 hari kerja efektif.'],
+                    'end_date' => ['Pengajuan susulan (backdate) maksimal H-2 hari kerja efektif dari tanggal selesai.'],
                 ]);
             }
         }
@@ -285,6 +286,17 @@ class LeaveController extends Controller
                         'scheduled_start_time' => ["Jam mulai Dinas Luar melewati jam pulang shift pada {$dateStr}."],
                     ]);
                 }
+
+                $shiftStart = $daySchedule?->shift?->start_time;
+                $durationMinutes = ($shiftStart !== null && $shiftEnd !== null)
+                    ? max(0, $this->minutesBetween(substr($shiftStart, 0, 5), substr($shiftEnd, 0, 5)))
+                    : 8 * 60;
+
+                if ($this->minutesBetween($scheduledStart, '23:59') < $durationMinutes) {
+                    throw ValidationException::withMessages([
+                        'scheduled_start_time' => ["Dinas Luar pada {$dateStr} akan melewati pukul 23:59. Geser jam mulai lebih awal."],
+                    ]);
+                }
             }
 
             $dayRows[] = [
@@ -312,6 +324,33 @@ class LeaveController extends Controller
             throw ValidationException::withMessages([
                 'end_date' => ['Pengajuan Izin maksimal 2 hari kerja efektif.'],
             ]);
+        }
+
+        if ($type === LeaveType::IZIN) {
+            /** @var array<string, float> $perMonth */
+            $perMonth = [];
+            foreach ($dayRows as $row) {
+                $perMonth[$row['month']] = ($perMonth[$row['month']] ?? 0.0) + $row['value'];
+            }
+
+            foreach ($perMonth as $month => $requested) {
+                $monthStart = CarbonImmutable::parse($month.'-01', $timezone)->toDateString();
+                $monthEnd = CarbonImmutable::parse($month.'-01', $timezone)->endOfMonth()->toDateString();
+
+                $used = LeaveRequestDay::query()
+                    ->where('user_id', $user->id)
+                    ->whereIn('status', [LeaveDayStatus::PENDING, LeaveDayStatus::APPROVED])
+                    ->whereDate('leave_date', '>=', $monthStart)
+                    ->whereDate('leave_date', '<=', $monthEnd)
+                    ->whereHas('leaveRequest', fn ($query) => $query->where('type', LeaveType::IZIN))
+                    ->sum('day_value');
+
+                if ((float) $used + $requested > 2.0) {
+                    throw ValidationException::withMessages([
+                        'end_date' => ["Akumulasi Izin bulan {$month} melebihi 2 hari kerja efektif (terpakai {$used} hari)."],
+                    ]);
+                }
+            }
         }
 
         $monthlyLimitWarning = false;
@@ -597,6 +636,14 @@ class LeaveController extends Controller
         }
 
         return $byMonth;
+    }
+
+    private function minutesBetween(string $from, string $to): int
+    {
+        [$fromHour, $fromMinute] = array_map('intval', explode(':', $from));
+        [$toHour, $toMinute] = array_map('intval', explode(':', $to));
+
+        return (($toHour * 60) + $toMinute) - (($fromHour * 60) + $fromMinute);
     }
 
     private function findMinBackdateDate(User $user, CarbonImmutable $todayLocal, int $effectiveWorkDays): CarbonImmutable

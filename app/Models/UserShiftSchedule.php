@@ -16,8 +16,10 @@ use Illuminate\Support\Carbon;
  * @property bool $is_day_off
  * @property ScheduleSource $source
  * @property string|null $notes
- * @property Carbon|null $replacement_for_date
- * @property int $created_by
+ * @property string|null $compensation_source_type
+ * @property int|null $compensation_source_id
+ * @property Carbon|null $compensation_source_date
+ * @property int|null $created_by
  * @property-read Shift|null $shift
  */
 #[Fillable([
@@ -27,7 +29,9 @@ use Illuminate\Support\Carbon;
     'is_day_off',
     'source',
     'notes',
-    'replacement_for_date',
+    'compensation_source_type',
+    'compensation_source_id',
+    'compensation_source_date',
     'created_by',
 ])]
 class UserShiftSchedule extends Model
@@ -41,7 +45,7 @@ class UserShiftSchedule extends Model
             'work_date' => 'date',
             'is_day_off' => 'boolean',
             'source' => ScheduleSource::class,
-            'replacement_for_date' => 'date',
+            'compensation_source_date' => 'date',
         ];
     }
 

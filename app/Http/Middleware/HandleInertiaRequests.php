@@ -53,6 +53,17 @@ class HandleInertiaRequests extends Middleware
                 ? ['name' => $office->name, 'timezone' => $office->timezone]
                 : null,
             'serverTimeIso' => CarbonImmutable::now('UTC')->toIso8601String(),
+            'notifications' => $user !== null
+                ? $user->notifications()->latest()->limit(5)->get()->map(fn ($notification): array => [
+                    'id' => $notification->id,
+                    'title' => (string) ($notification->data['title'] ?? 'Notifikasi'),
+                    'message' => (string) ($notification->data['message'] ?? ''),
+                    'url' => isset($notification->data['url']) ? (string) $notification->data['url'] : null,
+                    'read' => $notification->read_at !== null,
+                    'created_at' => $notification->created_at?->toIso8601String(),
+                ])->values()
+                : [],
+            'unreadNotifications' => $user !== null ? (int) $user->unreadNotifications()->count() : 0,
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];
     }

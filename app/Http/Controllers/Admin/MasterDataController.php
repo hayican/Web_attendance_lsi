@@ -25,6 +25,7 @@ use App\Models\ShiftPattern;
 use App\Models\TalentaMapping;
 use App\Models\User;
 use App\Models\UserShiftSchedule;
+use App\Notifications\StatusChangedNotification;
 use App\Services\AuditLogger;
 use App\Services\CsvSanitizer;
 use App\Services\ImageEvidenceService;
@@ -154,8 +155,54 @@ class MasterDataController extends Controller
             abort(403, 'Anda tidak berwenang melihat riwayat audit.');
         }
 
+        $records = AuditLog::query()
+            ->with('actor:id,nik,name')
+            ->latest('id')
+            ->limit(201)
+            ->get();
+
+        $logs = [];
+
+        foreach ($records as $index => $log) {
+            if ($index >= 200) {
+                break;
+            }
+
+            $older = $records->get($index + 1);
+            $hasHash = $log->row_hash !== null;
+
+            if (! $hasHash) {
+                $chainValid = true;
+            } elseif ($log->prev_hash === null) {
+                $chainValid = $older === null || $older->row_hash === null;
+            } else {
+                $chainValid = $older !== null
+                    && $older->row_hash !== null
+                    && hash_equals($older->row_hash, $log->prev_hash);
+            }
+
+            $logs[] = [
+                'id' => $log->id,
+                'actor' => $log->actor !== null
+                    ? ['nik' => $log->actor->nik, 'name' => $log->actor->name]
+                    : null,
+                'entity' => $log->entity,
+                'record_id' => $log->record_id,
+                'action' => $log->action->value,
+                'reason' => $log->reason,
+                'old_values' => $log->old_values,
+                'new_values' => $log->new_values,
+                'prev_hash' => $log->prev_hash,
+                'row_hash' => $log->row_hash,
+                'has_hash' => $hasHash,
+                'hash_valid' => $this->audit->verifyHash($log),
+                'chain_valid' => $chainValid,
+                'created_at' => $log->created_at->toIso8601String(),
+            ];
+        }
+
         return Inertia::render('admin/AuditLogs', [
-            'logs' => AuditLog::query()->with('actor:id,nik,name')->latest('id')->limit(200)->get(),
+            'logs' => $logs,
         ]);
     }
 
@@ -590,6 +637,8 @@ class MasterDataController extends Controller
                 ->whereDate('work_date', $targetDate)
                 ->first();
 
+            $origin = null;
+
             if ($replacementDate !== null) {
                 if (! (bool) $validated['is_day_off']) {
                     throw ValidationException::withMessages([
@@ -623,7 +672,7 @@ class MasterDataController extends Controller
 
                 $originUsed = UserShiftSchedule::query()
                     ->where('user_id', $user->id)
-                    ->whereDate('replacement_for_date', $replacementDate)
+                    ->whereDate('compensation_source_date', $replacementDate)
                     ->when($existing !== null, fn ($query) => $query->where('id', '!=', $existing->id))
                     ->exists();
 
@@ -633,36 +682,42 @@ class MasterDataController extends Controller
                     ]);
                 }
 
-                $originValid = $user->role === UserRole::EMPLOYEE_SALES
+                $isSales = $user->role === UserRole::EMPLOYEE_SALES;
+
+                $origin = $isSales
                     ? SalesVisit::query()
                         ->where('user_id', $user->id)
                         ->whereDate('visit_date', $replacementDate)
                         ->where('visit_status', '!=', VisitStatus::CANCELLED)
                         ->whereIn('verification_status', [VerificationStatus::AUTO_APPROVED->value, VerificationStatus::APPROVED->value])
                         ->get()
-                        ->contains(fn (SalesVisit $visit): bool => in_array('OFF_DAY_ATTENDANCE', $visit->anomaly_flags ?? [], true))
+                        ->first(fn (SalesVisit $visit): bool => in_array('OFF_DAY_ATTENDANCE', $visit->anomaly_flags ?? [], true))
                     : AttendanceLog::query()
                         ->where('user_id', $user->id)
                         ->whereDate('work_date', $replacementDate)
                         ->whereIn('clock_in_status', [VerificationStatus::AUTO_APPROVED->value, VerificationStatus::APPROVED->value])
                         ->where('is_active_attempt', 1)
                         ->get()
-                        ->contains(fn (AttendanceLog $log): bool => in_array('OFF_DAY_ATTENDANCE', $log->clock_in_anomaly_flags ?? [], true));
+                        ->first(fn (AttendanceLog $log): bool => in_array('OFF_DAY_ATTENDANCE', $log->clock_in_anomaly_flags ?? [], true));
 
-                if (! $originValid) {
+                if ($origin === null) {
                     throw ValidationException::withMessages([
                         'replacement_for_date' => ['Tanggal asal tidak memiliki kehadiran libur yang sah dan disetujui.'],
                     ]);
                 }
             }
 
-            $old = $existing?->only(['shift_id', 'is_day_off', 'source', 'notes', 'replacement_for_date']);
+            $snapshotKeys = ['shift_id', 'is_day_off', 'source', 'notes', 'compensation_source_type', 'compensation_source_id', 'compensation_source_date'];
+
+            $old = $existing?->only($snapshotKeys);
             $attributes = [
                 'shift_id' => (bool) $validated['is_day_off'] ? null : ($validated['shift_id'] ?? null),
                 'is_day_off' => (bool) $validated['is_day_off'],
                 'source' => ScheduleSource::MANUAL_OVERRIDE,
                 'notes' => $notes !== '' ? $notes : null,
-                'replacement_for_date' => $replacementDate,
+                'compensation_source_type' => $replacementDate !== null ? ($user->role === UserRole::EMPLOYEE_SALES ? 'SALES_VISIT' : 'ATTENDANCE_LOG') : null,
+                'compensation_source_id' => $origin?->id,
+                'compensation_source_date' => $replacementDate,
                 'created_by' => $actor->id,
             ];
 
@@ -684,7 +739,7 @@ class MasterDataController extends Controller
                 recordId: $saved->id,
                 action: $existing !== null ? AuditAction::UPDATE : AuditAction::CREATE,
                 oldValues: $old,
-                newValues: $saved->only(['shift_id', 'is_day_off', 'source', 'notes', 'replacement_for_date']),
+                newValues: $saved->only($snapshotKeys),
             );
 
             return $saved;
@@ -1142,6 +1197,14 @@ class MasterDataController extends Controller
             newValues: ['status' => $location->status->value, 'code' => $location->code, 'timezone' => $location->timezone],
             reason: $location->reject_reason,
         );
+
+        $location->creator?->notify(new StatusChangedNotification(
+            title: $newStatus === LocationStatus::ACTIVE ? 'Toko NOO disetujui' : 'Toko NOO ditolak',
+            message: $newStatus === LocationStatus::ACTIVE
+                ? "Pengajuan toko {$location->name} kini ACTIVE dan bisa dikunjungi."
+                : "Pengajuan toko {$location->name} ditolak: ".trim((string) $location->reject_reason),
+            url: '/attendance/sales',
+        ));
 
         return response()->json(['location' => $location->fresh()]);
     }

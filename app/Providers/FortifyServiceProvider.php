@@ -90,8 +90,7 @@ class FortifyServiceProvider extends ServiceProvider
 
             if ($throttle->isLocked($login, $ip, $user?->id)) {
                 throw ValidationException::withMessages([
-                    'email' => ['Terlalu banyak percobaan login gagal. Coba lagi dalam 15 menit atau hubungi HR Admin
-                untuk buka kunci.'],
+                    'email' => ['Terlalu banyak percobaan login gagal. Coba lagi dalam 15 menit atau hubungi HR Admin untuk buka kunci.'],
                 ]);
             }
 

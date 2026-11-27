@@ -72,10 +72,11 @@ class LoginThrottleService
 
     private function accountKey(string $login, string $ip, ?int $userId): string
     {
-        $normalized = mb_strtolower(trim($login));
-        $version = $this->lockVersion($userId);
+        if ($userId !== null) {
+            return "login_fail:user:{$userId}:{$ip}:v{$this->lockVersion($userId)}";
+        }
 
-        return "login_fail:{$normalized}:{$ip}:v{$version}";
+        return 'login_fail:unknown:'.mb_strtolower(trim($login)).":{$ip}";
     }
 
     private function ipKey(string $ip): string

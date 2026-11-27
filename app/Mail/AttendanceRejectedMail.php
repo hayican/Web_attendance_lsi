@@ -13,6 +13,11 @@ class AttendanceRejectedMail extends Mailable implements ShouldQueue
 {
     use Queueable, SerializesModels;
 
+    public int $tries = 3;
+
+    /** @var list<int> */
+    public array $backoff = [60, 300];
+
     public function __construct(
         public readonly string $employeeName,
         public readonly string $dateLabel,

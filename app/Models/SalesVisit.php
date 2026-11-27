@@ -14,6 +14,9 @@ use Illuminate\Support\Carbon;
  * @property int $id
  * @property int $user_id
  * @property int $outlet_location_id
+ * @property string|null $outlet_lat
+ * @property string|null $outlet_lng
+ * @property int|null $outlet_radius_m
  * @property AttendanceSource $source
  * @property Carbon $visit_date
  * @property Carbon|null $visit_in_at
@@ -40,6 +43,9 @@ use Illuminate\Support\Carbon;
 #[Fillable([
     'user_id',
     'outlet_location_id',
+    'outlet_lat',
+    'outlet_lng',
+    'outlet_radius_m',
     'source',
     'visit_date',
     'visit_in_at',
@@ -84,6 +90,9 @@ class SalesVisit extends Model
             'source' => AttendanceSource::class,
             'visit_date' => 'date',
             'visit_in_at' => 'datetime',
+            'outlet_lat' => 'decimal:7',
+            'outlet_lng' => 'decimal:7',
+            'outlet_radius_m' => 'integer',
             'visit_in_lat' => 'decimal:7',
             'visit_in_lng' => 'decimal:7',
             'visit_in_accuracy_m' => 'decimal:2',

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import { Button } from '@/components/ui/button';
     import { readXsrfToken } from '@/lib/gpsClient';
     import { compressCanvasToJpeg } from '@/lib/imageCompressor';
@@ -7,10 +7,12 @@
     let {
         facingMode = 'user',
         disabled = false,
+        autoStart = false,
         onCapture,
     }: {
         facingMode?: 'user' | 'environment';
         disabled?: boolean;
+        autoStart?: boolean;
         onCapture: (payload: { blob: Blob; cameraToken: string }) => void;
     } = $props();
 
@@ -20,6 +22,7 @@
     let errorMessage = $state<string | null>(null);
     let busy = $state(false);
     let previewUrl = $state<string | null>(null);
+    let destroyed = false;
 
     async function startCamera() {
         errorMessage = null;
@@ -53,11 +56,12 @@
                 audio: false,
             });
 
-            stream = media;
-            if (videoEl) {
-                videoEl.srcObject = media;
-                await videoEl.play();
+            if (destroyed) {
+                media.getTracks().forEach((track) => track.stop());
+                return;
             }
+
+            stream = media;
         } catch (err) {
             errorMessage =
                 err instanceof Error
@@ -115,7 +119,21 @@
         }
     }
 
+    $effect(() => {
+        if (videoEl && stream) {
+            videoEl.srcObject = stream;
+            void videoEl.play().catch(() => {});
+        }
+    });
+
+    onMount(() => {
+        if (autoStart && !disabled) {
+            void startCamera();
+        }
+    });
+
     onDestroy(() => {
+        destroyed = true;
         stopStream();
         if (previewUrl) {
             URL.revokeObjectURL(previewUrl);

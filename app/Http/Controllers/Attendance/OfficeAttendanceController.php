@@ -25,6 +25,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Throwable;
 
 class OfficeAttendanceController extends Controller
 {
@@ -102,6 +103,27 @@ class OfficeAttendanceController extends Controller
             && $rejectedLog->clock_out_at === null
             && $nowLocal->lessThan($closeDeadline);
 
+        $recentLogs = AttendanceLog::query()
+            ->with('shift:id,code')
+            ->where('user_id', $user->id)
+            ->whereDate('work_date', '>=', $nowLocal->subDays(6)->toDateString())
+            ->whereDate('work_date', '<=', $workDate)
+            ->orderByDesc('work_date')
+            ->orderByDesc('attempt_no')
+            ->get()
+            ->map(fn (AttendanceLog $log): array => [
+                'id' => $log->id,
+                'date' => $log->work_date->toDateString(),
+                'attempt_no' => $log->attempt_no,
+                'shift' => $log->shift?->code,
+                'clock_in_at' => $log->clock_in_at?->setTimezone($timezone)->format('H:i'),
+                'clock_out_at' => $log->clock_out_at?->setTimezone($timezone)->format('H:i'),
+                'clock_in_status' => $log->clock_in_status->value,
+                'clock_out_status' => $log->clock_out_status?->value,
+                'clock_in_flags' => $log->clock_in_anomaly_flags ?? [],
+                'clock_out_flags' => $log->clock_out_anomaly_flags ?? [],
+            ]);
+
         return Inertia::render($component, [
             'office' => [
                 'id' => $office->id,
@@ -134,6 +156,7 @@ class OfficeAttendanceController extends Controller
             'activeLog' => $activeLog !== null ? $this->summarizeAttendanceLog($activeLog) : null,
             'rejectedLog' => $rejectedLog !== null ? $this->summarizeAttendanceLog($rejectedLog) : null,
             'canRetryRejected' => $canRetryRejected,
+            'recentLogs' => $recentLogs,
         ]);
     }
 
@@ -292,9 +315,9 @@ class OfficeAttendanceController extends Controller
             }
         }
 
-        if (($geoEval['requires_notes'] || $isDayOff || $isRetryAfterEnd) && $notes === '') {
+        if (($geoEval['requires_notes'] || $isDayOff || $isRetryAfterEnd) && mb_strlen($notes) < 10) {
             throw ValidationException::withMessages([
-                'notes' => ['Alasan wajib diisi untuk kondisi lokasi, lembur/hari libur, atau absen ulang.'],
+                'notes' => ['Alasan wajib diisi minimal 10 karakter untuk kondisi lokasi, lembur/hari libur, atau absen ulang.'],
             ]);
         }
 
@@ -333,7 +356,17 @@ class OfficeAttendanceController extends Controller
             isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
         );
 
-        $flags = [...$geoEval['flags'], ...$fraud['flags']];
+        $isOfficeCompliant = $dinasLuar === null
+            && ! $isDayOff
+            && $distanceM <= $office->radius_m
+            && $accuracyM <= $office->radius_m
+            && $accuracyM <= 100.0;
+
+        $fraudFlags = $isOfficeCompliant
+            ? array_values(array_diff($fraud['flags'], ['REPEATED_COORDS', 'CONSTANT_ACCURACY']))
+            : $fraud['flags'];
+
+        $flags = [...$geoEval['flags'], ...$fraudFlags];
         if ($isDayOff) {
             $flags[] = 'OFF_DAY_ATTENDANCE';
         }
@@ -358,6 +391,8 @@ class OfficeAttendanceController extends Controller
             accuracyM: $accuracyM,
             serverTime: $nowUtc,
             timezone: $timezone,
+            employeeName: $user->name,
+            distanceM: $distanceM,
         );
 
         try {
@@ -393,7 +428,8 @@ class OfficeAttendanceController extends Controller
                     'leave_request_id' => $dinasLuar?->id,
                     'schedule_start_time' => $effectiveStart?->format('H:i:s'),
                     'schedule_end_time' => $effectiveEnd?->format('H:i:s'),
-                    'grace_period_minutes' => $shift?->grace_period_minutes,
+                    // @phpstan-ignore nullsafe.neverNull (Larastan treats the resolved shift as non-null)
+                    'grace_period_minutes' => $shift?->grace_period_minutes ?? 10,
                     'auto_close_hours' => $shift?->auto_close_hours,
                     'office_lat' => $office->latitude,
                     'office_lng' => $office->longitude,
@@ -426,9 +462,18 @@ class OfficeAttendanceController extends Controller
                     ->first();
 
                 if ($replayed !== null) {
+                    $this->imageEvidence->delete($photoPath);
+
                     return response()->json(['attendance' => $replayed, 'idempotent_replay' => true]);
                 }
             }
+
+            $this->imageEvidence->delete($photoPath);
+
+            throw $e;
+        } catch (Throwable $e) {
+            $this->imageEvidence->delete($photoPath);
+
             throw $e;
         }
 
@@ -497,6 +542,25 @@ class OfficeAttendanceController extends Controller
         $effectiveEnd = $log->schedule_end_time !== null
             ? CarbonImmutable::parse("{$workDate} {$log->schedule_end_time}", $timezone)
             : $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
+
+        $endOfDay = CarbonImmutable::parse("{$workDate} 23:59:59", $timezone);
+        $closeCap = $effectiveEnd !== null
+            ? $effectiveEnd->addHours($log->auto_close_hours ?? 5)
+            : $endOfDay;
+        $closeCap = $closeCap->greaterThan($endOfDay) ? $endOfDay : $closeCap;
+
+        if (in_array('MISSED_CLOCK_OUT', $log->clock_out_anomaly_flags ?? [], true)) {
+            throw ValidationException::withMessages([
+                'attendance' => ['Sesi ini sudah ditutup otomatis (MISSED_CLOCK_OUT). Hubungi HR Admin untuk koreksi.'],
+            ]);
+        }
+
+        if ($nowLocal->greaterThan($closeCap)) {
+            throw ValidationException::withMessages([
+                'attendance' => ['Batas waktu Clock-Out sudah terlewati. Hubungi HR Admin untuk input manual.'],
+            ]);
+        }
+
         $lat = (float) $validated['lat'];
         $lng = (float) $validated['lng'];
         $accuracyM = (float) $validated['accuracy_m'];
@@ -532,9 +596,9 @@ class OfficeAttendanceController extends Controller
         $notes = trim((string) ($validated['notes'] ?? ''));
         $requiresNotes = $geoEval['requires_notes'] || $earlyLeaveMinutes > 0 || $isDayOff || $isRetryAfterEnd;
 
-        if ($requiresNotes && $notes === '') {
+        if ($requiresNotes && mb_strlen($notes) < 10) {
             throw ValidationException::withMessages([
-                'notes' => ['Alasan wajib diisi saat pulang awal, di luar radius, atau akurasi GPS rendah.'],
+                'notes' => ['Alasan wajib diisi minimal 10 karakter saat pulang awal, di luar radius, atau akurasi GPS rendah.'],
             ]);
         }
 
@@ -554,7 +618,17 @@ class OfficeAttendanceController extends Controller
             isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
         );
 
-        $allFlags = array_values(array_unique([...$flags, ...$fraud['flags']]));
+        $isOfficeCompliant = $dinasLuar === null
+            && ! $isDayOff
+            && $distanceM <= $officeRadius
+            && $accuracyM <= $officeRadius
+            && $accuracyM <= 100.0;
+
+        $fraudFlags = $isOfficeCompliant
+            ? array_values(array_diff($fraud['flags'], ['REPEATED_COORDS', 'CONSTANT_ACCURACY']))
+            : $fraud['flags'];
+
+        $allFlags = array_values(array_unique([...$flags, ...$fraudFlags]));
         $needsReview = $allFlags !== [] || $isDayOff || $isRetryAfterEnd;
 
         /** @var UploadedFile $photo */
@@ -569,24 +643,32 @@ class OfficeAttendanceController extends Controller
             accuracyM: $accuracyM,
             serverTime: $nowUtc,
             timezone: $timezone,
+            employeeName: $user->name,
+            distanceM: $distanceM,
         );
 
-        $log->update([
-            'clock_out_at' => $nowUtc,
-            'clock_out_photo_url' => $photoPath,
-            'clock_out_lat' => $lat,
-            'clock_out_lng' => $lng,
-            'clock_out_accuracy_m' => $accuracyM,
-            'clock_out_distance_m' => $distanceM,
-            'clock_out_device_id' => $deviceId !== '' ? $deviceId : null,
-            'clock_out_ip' => $request->ip(),
-            'clock_out_user_agent' => $request->userAgent(),
-            'clock_out_notes' => $notes !== '' ? $notes : null,
-            'clock_out_idempotency_key' => $idempotencyKey,
-            'early_leave_minutes' => $earlyLeaveMinutes,
-            'clock_out_status' => $needsReview ? VerificationStatus::PENDING_REVIEW : VerificationStatus::AUTO_APPROVED,
-            'clock_out_anomaly_flags' => $allFlags !== [] ? $allFlags : null,
-        ]);
+        try {
+            $log->update([
+                'clock_out_at' => $nowUtc,
+                'clock_out_photo_url' => $photoPath,
+                'clock_out_lat' => $lat,
+                'clock_out_lng' => $lng,
+                'clock_out_accuracy_m' => $accuracyM,
+                'clock_out_distance_m' => $distanceM,
+                'clock_out_device_id' => $deviceId !== '' ? $deviceId : null,
+                'clock_out_ip' => $request->ip(),
+                'clock_out_user_agent' => $request->userAgent(),
+                'clock_out_notes' => $notes !== '' ? $notes : null,
+                'clock_out_idempotency_key' => $idempotencyKey,
+                'early_leave_minutes' => $earlyLeaveMinutes,
+                'clock_out_status' => $needsReview ? VerificationStatus::PENDING_REVIEW : VerificationStatus::AUTO_APPROVED,
+                'clock_out_anomaly_flags' => $allFlags !== [] ? $allFlags : null,
+            ]);
+        } catch (Throwable $e) {
+            $this->imageEvidence->delete($photoPath);
+
+            throw $e;
+        }
 
         return response()->json(['attendance' => $log->fresh()]);
     }

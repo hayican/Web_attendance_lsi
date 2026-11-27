@@ -16,7 +16,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-Route::inertia('/', 'Welcome')->name('home');
+Route::get('/', fn () => redirect()->route(auth()->check() ? 'dashboard' : 'login'))->name('home');
 
 Route::middleware(['auth', 'active', 'password.changed'])->group(function () {
     Route::get('consent', [ConsentController::class, 'show'])->name('consent.show');
@@ -25,6 +25,12 @@ Route::middleware(['auth', 'active', 'password.changed'])->group(function () {
 });
 
 Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])->group(function () {
+    Route::post('notifications/read-all', function (Request $request) {
+        $request->user()?->unreadNotifications()->update(['read_at' => now('UTC')]);
+
+        return back();
+    })->name('notifications.read-all');
+
     Route::get('dashboard', function (Request $request) {
         /** @var User $user */
         $user = $request->user();

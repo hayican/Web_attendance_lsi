@@ -14,6 +14,7 @@ use App\Models\LeaveBalance;
 use App\Models\LeaveRequest;
 use App\Models\LeaveRequestDay;
 use App\Models\User;
+use App\Notifications\StatusChangedNotification;
 use App\Services\AuditLogger;
 use App\Services\ImageEvidenceService;
 use App\Services\LeaveBalanceService;
@@ -125,6 +126,12 @@ class LeaveApprovalController extends Controller
             }
         });
 
+        $leaveRequest->user->notify(new StatusChangedNotification(
+            title: 'Pengajuan disetujui',
+            message: 'Pengajuan '.$leaveRequest->type->value.' Anda telah disetujui HR.',
+            url: route('leave.index', absolute: false),
+        ));
+
         return response()->json(['leave_request' => $leaveRequest->fresh('days')]);
     }
 
@@ -203,6 +210,12 @@ class LeaveApprovalController extends Controller
                     });
             }
         });
+
+        $leaveRequest->user->notify(new StatusChangedNotification(
+            title: 'Pengajuan ditolak',
+            message: 'Pengajuan '.$leaveRequest->type->value.' Anda ditolak: '.trim((string) $validated['reject_reason']),
+            url: route('leave.index', absolute: false),
+        ));
 
         return response()->json(['leave_request' => $leaveRequest->fresh('days')]);
     }

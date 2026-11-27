@@ -35,6 +35,8 @@ class ImageEvidenceService
         float $accuracyM,
         CarbonInterface $serverTime,
         string $timezone,
+        string $employeeName,
+        ?float $distanceM = null,
     ): string {
         $this->assertValidImage($file);
 
@@ -59,8 +61,15 @@ class ImageEvidenceService
 
         $localTime = $serverTime->copy()->setTimezone($timezone);
         $lines = [
-            sprintf('%s | %s', $nik, $localTime->format('d-m-Y H:i:s T')),
-            sprintf('%s | GPS: %.6f, %.6f (+/-%.0fm)', Str::limit($locationLabel, 28, ''), $lat, $lng, $accuracyM),
+            sprintf('%s | %s | %s', Str::limit($employeeName, 24, ''), $nik, $localTime->format('d-m-Y H:i:s T')),
+            sprintf(
+                '%s | Jarak: %s m | GPS: %.6f, %.6f (+/-%.0fm)',
+                Str::limit($locationLabel, 24, ''),
+                $distanceM !== null ? number_format($distanceM, 0, ',', '.') : '-',
+                $lat,
+                $lng,
+                $accuracyM,
+            ),
         ];
 
         $height = $image->height();
@@ -160,6 +169,12 @@ class ImageEvidenceService
         Storage::disk('local')->put($relativePath, (string) $image->encodeUsingFormat(Format::JPEG, quality: 85));
 
         return $relativePath;
+    }
+
+    /** Remove an evidence file, e.g. when the owning transaction rolled back. */
+    public function delete(string $relativePath): void
+    {
+        Storage::disk('local')->delete($relativePath);
     }
 
     public function signedUrl(string $relativePath, int $minutes = self::SIGNED_URL_MINUTES): string
