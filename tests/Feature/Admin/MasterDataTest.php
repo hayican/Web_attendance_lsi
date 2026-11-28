@@ -405,12 +405,30 @@ test('manual balance adjustment and atomic CSV import preserve used/pending days
 
     expect((float) $empBal->fresh()->adjustment_days)->toBe(3.5);
 
-    // Valid batch updates EMP888 & EMP889 without granting premature base_quota to <1 yr hire
+    // Atomic block: employee < 1 year cannot receive positive adjustment_days (rolls back entire batch)
     $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
         'year' => 2026,
         'rows' => [
-            ['nik' => 'EMP888', 'adjustment_days' => -1.5],
-            ['nik' => 'EMP889', 'adjustment_days' => 1.0],
+            ['nik' => 'EMP888', 'adjustment_days' => -1.5, 'notes' => 'Seharusnya rollback'],
+            ['nik' => 'EMP889', 'adjustment_days' => 1.0, 'notes' => 'Saldo positif ilegal'],
+        ],
+    ])->assertUnprocessable();
+
+    expect((float) $empBal->fresh()->adjustment_days)->toBe(3.5)
+        ->and($newHire->leaveBalances()->where('year', 2026)->exists())->toBeFalse();
+
+    // Formula injection in notes rejected atomically
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'rows' => [
+            ['nik' => 'EMP888', 'year' => 2026, 'adjustment_days' => -1.0, 'notes' => '=HYPERLINK("http://evil")'],
+        ],
+    ])->assertUnprocessable();
+
+    // Official header format (nik,year,adjustment_days,notes) preserves used/pending, allows <= 0 for < 1 yr, logs notes to audit reason
+    $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
+        'rows' => [
+            ['nik' => 'EMP888', 'year' => 2026, 'adjustment_days' => -1.5, 'notes' => 'Migrasi saldo Talenta Q1'],
+            ['nik' => 'EMP889', 'year' => 2026, 'adjustment_days' => 0.0, 'notes' => 'Inisialisasi karyawan baru'],
         ],
     ])->assertOk()->assertJsonPath('updated_count', 2);
 
@@ -420,19 +438,24 @@ test('manual balance adjustment and atomic CSV import preserve used/pending days
         ->and((float) $empBal->used_days)->toBe(2.0)
         ->and((float) $empBal->pending_days)->toBe(1.0)
         ->and((float) $newBal->base_quota)->toBe(0.0)
-        ->and((float) $newBal->adjustment_days)->toBe(1.0);
+        ->and((float) $newBal->adjustment_days)->toBe(0.0);
+
+    expect(AuditLog::query()
+        ->where('entity', 'leave_balances')
+        ->where('record_id', $empBal->id)
+        ->where('action', AuditAction::BULK_IMPORT)
+        ->where('reason', 'Migrasi saldo Talenta Q1')
+        ->exists())->toBeTrue();
 
     // Scheduler owns base_quota/prorated_deduction: CSV values are ignored, adjustment_days remains the only lever
     $this->actingAs($hr)->postJson('/admin/users/leave-balances/import', [
-        'year' => 2026,
-        'rows' => [['nik' => 'EMP889', 'adjustment_days' => 1.5, 'base_quota' => 12, 'prorated_deduction' => 6]],
+        'rows' => [['nik' => 'EMP889', 'year' => 2026, 'adjustment_days' => -0.5, 'base_quota' => 12, 'prorated_deduction' => 6]],
     ])->assertOk();
 
     $newBal->refresh();
     expect((float) $newBal->base_quota)->toBe(0.0)
         ->and((float) $newBal->prorated_deduction)->toBe(0.0)
-        ->and((float) $newBal->adjustment_days)->toBe(1.5);
-
+        ->and((float) $newBal->adjustment_days)->toBe(-0.5);
     CarbonImmutable::setTestNow();
 });
 

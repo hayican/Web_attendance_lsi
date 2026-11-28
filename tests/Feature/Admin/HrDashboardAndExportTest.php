@@ -12,6 +12,7 @@ use App\Enums\UserRole;
 use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
 use App\Mail\AttendanceRejectedMail;
+use App\Models\ActivityCategory;
 use App\Models\AttendanceLog;
 use App\Models\AuditLog;
 use App\Models\Holiday;
@@ -25,6 +26,7 @@ use App\Models\ShiftPattern;
 use App\Models\TalentaMapping;
 use App\Models\User;
 use App\Models\UserShiftSchedule;
+use App\Services\AuditLogger;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
@@ -1096,4 +1098,325 @@ test('talenta export keeps employees active before their deactivation date and s
         ->not->toContain('2026-11-23');
 
     CarbonImmutable::setTestNow();
+});
+
+test('dashboard splits two-phase queue, uses snapshot coords, locks IN_PROGRESS visits, shows non-self manual entries, and transitions Belum Absen to Alpa after effective_end_time', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-25 18:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create([
+        'timezone' => 'Asia/Jakarta',
+        'work_days' => [1, 2, 3, 4, 5],
+        'latitude' => -6.100000,
+        'longitude' => 106.800000,
+        'radius_m' => 100,
+    ]);
+    $outlet = Location::factory()->create([
+        'type' => LocationType::OUTLET,
+        'timezone' => 'Asia/Jakarta',
+        'latitude' => -6.200000,
+        'longitude' => 106.900000,
+        'radius_m' => 150,
+    ]);
+    $shift = Shift::query()->create([
+        'code' => 'M5SH1',
+        'name' => 'Shift M5 1',
+        'start_time' => '08:00:00',
+        'end_time' => '17:00:00',
+        'grace_period_minutes' => 0,
+        'auto_close_hours' => 14,
+        'is_active' => true,
+    ]);
+
+    $hr1 = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id, 'join_date' => '2025-01-01']);
+    $hr2 = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id, 'join_date' => '2025-01-01']);
+    $empPending = User::factory()->create(['role' => UserRole::EMPLOYEE_OFFICE, 'office_location_id' => $office->id, 'join_date' => '2025-01-01']);
+    $empAlpa = User::factory()->create(['role' => UserRole::EMPLOYEE_OFFICE, 'office_location_id' => $office->id, 'join_date' => '2025-01-01']);
+    $sales = User::factory()->create(['role' => UserRole::EMPLOYEE_SALES, 'office_location_id' => $office->id, 'join_date' => '2025-01-01']);
+
+    UserShiftSchedule::query()->create([
+        'user_id' => $empAlpa->id,
+        'work_date' => '2026-11-25',
+        'shift_id' => $shift->id,
+        'is_day_off' => false,
+        'source' => ScheduleSource::PATTERN,
+    ]);
+
+    AttendanceLog::query()->create([
+        'user_id' => $empPending->id,
+        'location_id' => $office->id,
+        'shift_id' => $shift->id,
+        'office_lat' => '-6.123456',
+        'office_lng' => '106.654321',
+        'office_radius_m' => 75,
+        'schedule_end_time' => '17:00:00',
+        'source' => AttendanceSource::APP,
+        'work_date' => '2026-11-25',
+        'attempt_no' => 1,
+        'is_active_attempt' => 1,
+        'clock_in_at' => CarbonImmutable::parse('2026-11-25 08:05:00', 'Asia/Jakarta')->utc(),
+        'clock_in_status' => VerificationStatus::PENDING_REVIEW,
+        'clock_in_anomaly_flags' => ['OUTSIDE_RADIUS'],
+        'clock_out_status' => VerificationStatus::PENDING_REVIEW,
+        'clock_out_anomaly_flags' => ['MISSED_CLOCK_OUT'],
+    ]);
+
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'outlet_lat' => '-6.222222',
+        'outlet_lng' => '106.999999',
+        'outlet_radius_m' => 90,
+        'source' => AttendanceSource::APP,
+        'visit_date' => '2026-11-25',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-25 10:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::IN_PROGRESS,
+        'verification_status' => VerificationStatus::PENDING_REVIEW,
+        'anomaly_flags' => ['OUTSIDE_RADIUS'],
+    ]);
+
+    AuditLog::query()->create([
+        'actor_id' => $hr2->id,
+        'entity' => 'attendance_logs',
+        'record_id' => 1,
+        'action' => AuditAction::MANUAL_ATTENDANCE,
+        'new_values' => ['user_id' => $empPending->id, 'work_date' => '2026-11-24'],
+        'reason' => 'Input manual oleh HR lain',
+        'created_at' => now('UTC'),
+    ]);
+    AuditLog::query()->create([
+        'actor_id' => $hr1->id,
+        'entity' => 'attendance_logs',
+        'record_id' => 2,
+        'action' => AuditAction::MANUAL_ATTENDANCE,
+        'new_values' => ['user_id' => $empPending->id, 'work_date' => '2026-11-24'],
+        'reason' => 'Input manual oleh diri sendiri',
+        'created_at' => now('UTC'),
+    ]);
+
+    $this->actingAs($hr1)
+        ->get('/admin/dashboard?date=2026-11-25')
+        ->assertOk()
+        ->assertInertia(function ($page) use ($empPending, $empAlpa, $hr2): void {
+            $props = $page->toArray()['props'];
+            $queue = collect($props['pendingQueue']);
+            $attItems = $queue->where('kind', 'attendance')->values();
+            $visitItem = $queue->firstWhere('kind', 'visit');
+            $alpaRow = collect($props['dailyRecap'])->firstWhere('user_id', $empAlpa->id);
+            $manualEntries = collect($props['recentManualEntries']);
+
+            expect($attItems)->toHaveCount(2)
+                ->and($attItems->pluck('phase')->all())->toBe(['clock_in', 'clock_out'])
+                ->and($attItems[0]['target_lat'])->toBe(-6.123456)
+                ->and($attItems[0]['radius_m'])->toBe(75)
+                ->and($attItems[1]['default_out_time'])->toBe('17:00')
+                ->and($visitItem['review_locked'])->toBeTrue()
+                ->and($visitItem['visit_status'])->toBe(VisitStatus::IN_PROGRESS->value)
+                ->and($visitItem['target_lat'])->toBe(-6.222222)
+                ->and($alpaRow['attendance_status'])->toBe('Alpa')
+                ->and($manualEntries)->toHaveCount(1)
+                ->and($manualEntries[0]['actor_nik'])->toBe($hr2->nik)
+                ->and($manualEntries[0]['target_name'])->toBe($empPending->name);
+        });
+
+    CarbonImmutable::setTestNow();
+});
+
+test('reviewAttendance rejects clock_out <= clock_in, correctAttendanceStatus adjusts time and recalculates minutes, and correctVisitStatus approves rejected visit or blocks on approved leave', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-25 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['timezone' => 'Asia/Jakarta']);
+    $outlet = Location::factory()->create(['type' => LocationType::OUTLET, 'timezone' => 'Asia/Jakarta']);
+    $shift = Shift::query()->create([
+        'code' => 'M5SH2',
+        'name' => 'Shift M5 2',
+        'start_time' => '08:00:00',
+        'end_time' => '17:00:00',
+        'grace_period_minutes' => 10,
+        'auto_close_hours' => 14,
+        'is_active' => true,
+    ]);
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id]);
+    $emp = User::factory()->create(['role' => UserRole::EMPLOYEE_OFFICE, 'office_location_id' => $office->id]);
+    $sales = User::factory()->create(['role' => UserRole::EMPLOYEE_SALES, 'office_location_id' => $office->id]);
+
+    $missedLog = AttendanceLog::query()->create([
+        'user_id' => $emp->id,
+        'location_id' => $office->id,
+        'shift_id' => $shift->id,
+        'source' => AttendanceSource::APP,
+        'work_date' => '2026-11-24',
+        'attempt_no' => 1,
+        'is_active_attempt' => 1,
+        'clock_in_at' => CarbonImmutable::parse('2026-11-24 09:00:00', 'Asia/Jakarta')->utc(),
+        'clock_in_status' => VerificationStatus::APPROVED,
+        'clock_out_at' => null,
+        'clock_out_status' => VerificationStatus::PENDING_REVIEW,
+    ]);
+
+    $this->actingAs($hr)
+        ->postJson("/admin/attendance/{$missedLog->id}/review", [
+            'phase' => 'clock_out',
+            'decision' => 'APPROVED',
+            'clock_out_at' => '2026-11-24T08:30:00+07:00',
+        ])->assertUnprocessable();
+
+    $rejectedLog = AttendanceLog::query()->create([
+        'user_id' => $emp->id,
+        'location_id' => $office->id,
+        'shift_id' => $shift->id,
+        'schedule_start_time' => '08:00:00',
+        'schedule_end_time' => '17:00:00',
+        'grace_period_minutes' => 10,
+        'source' => AttendanceSource::APP,
+        'work_date' => '2026-11-23',
+        'attempt_no' => 1,
+        'is_active_attempt' => null,
+        'clock_in_at' => CarbonImmutable::parse('2026-11-23 08:00:00', 'Asia/Jakarta')->utc(),
+        'clock_in_status' => VerificationStatus::REJECTED,
+        'clock_out_at' => CarbonImmutable::parse('2026-11-23 17:00:00', 'Asia/Jakarta')->utc(),
+        'clock_out_status' => VerificationStatus::APPROVED,
+    ]);
+
+    $this->actingAs($hr)
+        ->postJson("/admin/attendance/{$rejectedLog->id}/correct", [
+            'phase' => 'clock_in',
+            'reason' => 'Penyesuaian jam masuk dan pulang',
+            'clock_in_time' => '08:25',
+            'clock_out_time' => '16:30',
+        ])->assertOk();
+
+    $rejectedLog->refresh();
+    expect($rejectedLog->clock_in_status)->toBe(VerificationStatus::APPROVED)
+        ->and($rejectedLog->late_minutes)->toBe(25)
+        ->and($rejectedLog->early_leave_minutes)->toBe(30);
+
+    $visit = SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'source' => AttendanceSource::APP,
+        'visit_date' => '2026-11-24',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-24 10:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::COMPLETED,
+        'verification_status' => VerificationStatus::REJECTED,
+        'reject_reason' => 'Foto buram',
+    ]);
+
+    $this->actingAs($hr)
+        ->postJson("/admin/visits/{$visit->id}/correct", [
+            'reason' => 'Bukti kunjungan valid setelah cek ulang',
+        ])->assertOk();
+
+    expect($visit->fresh()->verification_status)->toBe(VerificationStatus::APPROVED)
+        ->and($visit->fresh()->reject_reason)->toBeNull();
+
+    $blockedVisit = SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'source' => AttendanceSource::APP,
+        'visit_date' => '2026-11-22',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-22 10:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::COMPLETED,
+        'verification_status' => VerificationStatus::REJECTED,
+    ]);
+    $leave = LeaveRequest::query()->create([
+        'user_id' => $sales->id,
+        'type' => LeaveType::IZIN,
+        'start_date' => '2026-11-22',
+        'end_date' => '2026-11-22',
+        'total_days' => 1,
+        'reason' => 'Izin keluarga',
+        'status' => LeaveStatus::APPROVED,
+    ]);
+    LeaveRequestDay::query()->create([
+        'leave_request_id' => $leave->id,
+        'user_id' => $sales->id,
+        'leave_date' => '2026-11-22',
+        'day_value' => 1,
+        'status' => LeaveDayStatus::APPROVED,
+    ]);
+
+    $this->actingAs($hr)
+        ->postJson("/admin/visits/{$blockedVisit->id}/correct", [
+            'reason' => 'Mencoba koreksi saat izin approved',
+        ])->assertStatus(409);
+
+    CarbonImmutable::setTestNow();
+});
+
+test('storeManualAttendance supports EMPLOYEE_SALES with and without visit_out_time and logs audit', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-25 14:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['timezone' => 'Asia/Jakarta']);
+    $outlet = Location::factory()->create(['type' => LocationType::OUTLET, 'timezone' => 'Asia/Jakarta']);
+    $category = ActivityCategory::query()->create(['name' => 'Presentasi Produk', 'is_active' => true]);
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id]);
+    $sales = User::factory()->create(['role' => UserRole::EMPLOYEE_SALES, 'office_location_id' => $office->id]);
+
+    $this->actingAs($hr)
+        ->postJson('/admin/attendance/manual', [
+            'user_id' => $sales->id,
+            'work_date' => '2026-11-24',
+            'outlet_location_id' => $outlet->id,
+            'visit_in_time' => '09:00',
+            'visit_out_time' => '10:30',
+            'activity_category_id' => $category->id,
+            'reason' => 'Input manual kunjungan sales selesai',
+        ])->assertCreated();
+
+    $this->actingAs($hr)
+        ->postJson('/admin/attendance/manual', [
+            'user_id' => $sales->id,
+            'work_date' => '2026-11-25',
+            'outlet_location_id' => $outlet->id,
+            'visit_in_time' => '11:00',
+            'reason' => 'Input manual kunjungan tanpa jam pulang',
+        ])->assertCreated();
+
+    $visits = SalesVisit::query()->where('user_id', $sales->id)->orderBy('visit_date')->get();
+    expect($visits)->toHaveCount(2)
+        ->and($visits[0]->source)->toBe(AttendanceSource::MANUAL_HR)
+        ->and($visits[0]->visit_status)->toBe(VisitStatus::COMPLETED)
+        ->and($visits[0]->duration_minutes)->toBe(90)
+        ->and($visits[1]->visit_status)->toBe(VisitStatus::AUTO_CLOSED)
+        ->and(AuditLog::query()->where('entity', 'sales_visits')->where('action', AuditAction::MANUAL_ATTENDANCE)->count())->toBe(2);
+
+    CarbonImmutable::setTestNow();
+});
+
+test('audit logs endpoint filters by entity and action while preserving chain_valid', function () {
+    $office = Location::factory()->create(['timezone' => 'Asia/Jakarta']);
+    $hr = User::factory()->create(['role' => UserRole::HR_ADMIN, 'office_location_id' => $office->id]);
+    $auditLogger = app(AuditLogger::class);
+
+    $auditLogger->log(
+        actorId: $hr->id,
+        entity: 'attendance_logs',
+        recordId: 10,
+        action: AuditAction::MANUAL_ATTENDANCE,
+        newValues: ['work_date' => '2026-11-24'],
+        reason: 'Manual office',
+    );
+    $auditLogger->log(
+        actorId: $hr->id,
+        entity: 'sales_visits',
+        recordId: 20,
+        action: AuditAction::MANUAL_ATTENDANCE,
+        newValues: ['visit_date' => '2026-11-24'],
+        reason: 'Manual sales',
+    );
+
+    $this->actingAs($hr)
+        ->get('/admin/audit-logs?entity=sales_visits&action=MANUAL_ATTENDANCE')
+        ->assertOk()
+        ->assertInertia(function ($page): void {
+            $props = $page->toArray()['props'];
+            expect($props['logs'])->toHaveCount(1)
+                ->and($props['logs'][0]['entity'])->toBe('sales_visits')
+                ->and($props['logs'][0]['action'])->toBe('MANUAL_ATTENDANCE')
+                ->and($props['logs'][0]['hash_valid'])->toBeTrue()
+                ->and($props['logs'][0]['chain_valid'])->toBeTrue()
+                ->and($props['filters']['entity'])->toBe('sales_visits')
+                ->and($props['availableEntities'])->toContain('sales_visits')
+                ->and($props['availableActions'])->toContain('MANUAL_ATTENDANCE');
+        });
 });

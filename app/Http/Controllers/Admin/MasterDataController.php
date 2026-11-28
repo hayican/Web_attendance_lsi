@@ -56,29 +56,153 @@ class MasterDataController extends Controller
 
     public function index(): Response
     {
-        $currentYear = (int) CarbonImmutable::now('Asia/Jakarta')->year;
+        $nowUtc = CarbonImmutable::now('UTC');
+        $nowJakarta = $nowUtc->setTimezone('Asia/Jakarta');
+        $currentYear = (int) $nowJakarta->year;
         $activeHrCount = User::query()
             ->where('role', UserRole::HR_ADMIN)
             ->where('is_active', true)
             ->count();
 
-        $users = User::query()
+        $userModels = User::query()
             ->with([
                 'officeLocation:id,name,timezone',
                 'defaultShiftPattern:id,name',
                 'leaveBalances' => fn ($q) => $q->where('year', $currentYear),
             ])
             ->orderBy('name')
-            ->get()
-            ->map(function (User $u): array {
-                $arr = $u->toArray();
-                $arr['join_date'] = $u->join_date->toDateString();
-                $arr['reference_photo_signed_url'] = $u->reference_photo_url !== null
-                    ? $this->imageEvidence->signedUrl($u->reference_photo_url)
-                    : null;
+            ->get();
 
-                return $arr;
-            });
+        $userMeta = [];
+        $officeUserIds = [];
+        $salesUserIds = [];
+        foreach ($userModels as $u) {
+            $userMeta[$u->id] = [
+                'role' => $u->role,
+                'timezone' => $u->officeLocation->timezone ?? 'Asia/Jakarta',
+            ];
+            if ($u->role === UserRole::EMPLOYEE_OFFICE) {
+                $officeUserIds[] = $u->id;
+            } elseif ($u->role === UserRole::EMPLOYEE_SALES) {
+                $salesUserIds[] = $u->id;
+            }
+        }
+
+        $users = $userModels->map(function (User $u): array {
+            $arr = $u->toArray();
+            $arr['join_date'] = $u->join_date->toDateString();
+            $arr['reference_photo_signed_url'] = $u->reference_photo_url !== null
+                ? $this->imageEvidence->signedUrl($u->reference_photo_url)
+                : null;
+
+            return $arr;
+        });
+
+        $windowStart = $nowJakarta->subDays(35)->toDateString();
+        $collectiveDates = Holiday::query()
+            ->where('holiday_type', HolidayType::COLLECTIVE_LEAVE)
+            ->whereDate('holiday_date', '>=', $windowStart)
+            ->get(['holiday_date'])
+            ->mapWithKeys(fn (Holiday $h): array => [$h->holiday_date->toDateString() => true])
+            ->all();
+
+        $usedOrigins = UserShiftSchedule::query()
+            ->whereNotNull('compensation_source_date')
+            ->whereDate('compensation_source_date', '>=', $windowStart)
+            ->get(['user_id', 'compensation_source_date'])
+            ->mapWithKeys(fn (UserShiftSchedule $s): array => [
+                $s->user_id.'|'.($s->compensation_source_date?->toDateString() ?? '') => true,
+            ])
+            ->all();
+
+        $eligibleGantiHariOrigins = [];
+        $seenOrigins = [];
+
+        $appendOrigin = function (int $userId, string $sourceDate, string $sourceType, int $sourceId) use (
+            $userMeta,
+            $nowUtc,
+            $collectiveDates,
+            $usedOrigins,
+            &$seenOrigins,
+            &$eligibleGantiHariOrigins
+        ): void {
+            $key = $userId.'|'.$sourceDate;
+            if (isset($seenOrigins[$key]) || isset($usedOrigins[$key]) || isset($collectiveDates[$sourceDate])) {
+                return;
+            }
+
+            $tz = $userMeta[$userId]['timezone'] ?? 'Asia/Jakarta';
+            $todayLocal = $nowUtc->setTimezone($tz)->toDateString();
+            $deadline = $this->gantiHariDeadline($sourceDate, $tz);
+            if ($sourceDate > $todayLocal || $deadline < $todayLocal) {
+                return;
+            }
+
+            $seenOrigins[$key] = true;
+            $eligibleGantiHariOrigins[] = [
+                'user_id' => $userId,
+                'source_date' => $sourceDate,
+                'source_type' => $sourceType,
+                'source_id' => $sourceId,
+                'deadline_date' => $deadline,
+            ];
+        };
+
+        if ($officeUserIds !== []) {
+            $offDayLogs = AttendanceLog::query()
+                ->whereIn('user_id', $officeUserIds)
+                ->whereDate('work_date', '>=', $windowStart)
+                ->where('clock_in_status', VerificationStatus::APPROVED)
+                ->where('clock_out_status', VerificationStatus::APPROVED)
+                ->whereNotNull('clock_out_at')
+                ->where('is_active_attempt', 1)
+                ->orderByDesc('work_date')
+                ->get(['id', 'user_id', 'work_date', 'clock_in_anomaly_flags']);
+
+            foreach ($offDayLogs as $log) {
+                if (! in_array('OFF_DAY_ATTENDANCE', $log->clock_in_anomaly_flags ?? [], true)) {
+                    continue;
+                }
+                $appendOrigin($log->user_id, $log->work_date->toDateString(), 'ATTENDANCE_LOG', $log->id);
+            }
+        }
+
+        if ($salesUserIds !== []) {
+            $offDayVisits = SalesVisit::query()
+                ->whereIn('user_id', $salesUserIds)
+                ->whereDate('visit_date', '>=', $windowStart)
+                ->where('verification_status', VerificationStatus::APPROVED)
+                ->whereIn('visit_status', [VisitStatus::COMPLETED->value, VisitStatus::AUTO_CLOSED->value])
+                ->orderByDesc('visit_date')
+                ->get(['id', 'user_id', 'visit_date', 'anomaly_flags']);
+
+            foreach ($offDayVisits as $visit) {
+                if (! in_array('OFF_DAY_ATTENDANCE', $visit->anomaly_flags ?? [], true)) {
+                    continue;
+                }
+                $appendOrigin($visit->user_id, $visit->visit_date->toDateString(), 'SALES_VISIT', $visit->id);
+            }
+        }
+
+        $upcomingGantiHari = UserShiftSchedule::query()
+            ->whereNotNull('compensation_source_date')
+            ->whereDate('work_date', '>=', $nowJakarta->toDateString())
+            ->orderBy('work_date')
+            ->get(['id', 'user_id', 'work_date', 'compensation_source_date', 'notes'])
+            ->filter(function (UserShiftSchedule $schedule) use ($userMeta, $nowUtc): bool {
+                $tz = $userMeta[$schedule->user_id]['timezone'] ?? 'Asia/Jakarta';
+
+                return $schedule->work_date->toDateString() >= $nowUtc->setTimezone($tz)->toDateString();
+            })
+            ->values()
+            ->map(fn (UserShiftSchedule $schedule): array => [
+                'id' => $schedule->id,
+                'user_id' => $schedule->user_id,
+                'work_date' => $schedule->work_date->toDateString(),
+                'compensation_source_date' => $schedule->compensation_source_date?->toDateString() ?? '',
+                'notes' => $schedule->notes,
+            ])
+            ->all();
 
         return Inertia::render('admin/MasterData', [
             'currentYear' => $currentYear,
@@ -89,6 +213,8 @@ class MasterDataController extends Controller
             'patterns' => ShiftPattern::query()->orderBy('name')->get(),
             'holidays' => Holiday::query()->with('location:id,name')->orderByDesc('holiday_date')->get(),
             'categories' => ActivityCategory::query()->orderBy('name')->get(),
+            'eligibleGantiHariOrigins' => $eligibleGantiHariOrigins,
+            'upcomingGantiHari' => $upcomingGantiHari,
         ]);
     }
 
@@ -155,11 +281,30 @@ class MasterDataController extends Controller
             abort(403, 'Anda tidak berwenang melihat riwayat audit.');
         }
 
-        $records = AuditLog::query()
+        $entity = trim((string) $request->query('entity', ''));
+        $action = trim((string) $request->query('action', ''));
+        $dateFrom = trim((string) $request->query('date_from', ''));
+        $dateTo = trim((string) $request->query('date_to', ''));
+        $isFiltered = $entity !== '' || $action !== '' || $dateFrom !== '' || $dateTo !== '';
+
+        $query = AuditLog::query()
             ->with('actor:id,nik,name')
-            ->latest('id')
-            ->limit(201)
-            ->get();
+            ->latest('id');
+
+        if ($entity !== '') {
+            $query->where('entity', $entity);
+        }
+        if ($action !== '') {
+            $query->where('action', $action);
+        }
+        if ($dateFrom !== '') {
+            $query->whereDate('created_at', '>=', $dateFrom);
+        }
+        if ($dateTo !== '') {
+            $query->whereDate('created_at', '<=', $dateTo);
+        }
+
+        $records = $query->limit(201)->get();
 
         $logs = [];
 
@@ -168,7 +313,9 @@ class MasterDataController extends Controller
                 break;
             }
 
-            $older = $records->get($index + 1);
+            $older = $isFiltered
+                ? AuditLog::query()->where('id', '<', $log->id)->orderByDesc('id')->first(['id', 'row_hash'])
+                : $records->get($index + 1);
             $hasHash = $log->row_hash !== null;
 
             if (! $hasHash) {
@@ -203,6 +350,14 @@ class MasterDataController extends Controller
 
         return Inertia::render('admin/AuditLogs', [
             'logs' => $logs,
+            'filters' => [
+                'entity' => $entity,
+                'action' => $action,
+                'date_from' => $dateFrom,
+                'date_to' => $dateTo,
+            ],
+            'availableEntities' => AuditLog::query()->distinct()->orderBy('entity')->pluck('entity')->values(),
+            'availableActions' => array_map(fn (AuditAction $a): string => $a->value, AuditAction::cases()),
         ]);
     }
 
@@ -524,19 +679,20 @@ class MasterDataController extends Controller
         $actor = $request->user();
 
         $validated = $request->validate([
-            'year' => ['required', 'integer', 'min:2024', 'max:2100'],
+            'year' => ['nullable', 'integer', 'min:2024', 'max:2100'],
             'rows' => ['required', 'array', 'min:1'],
             'rows.*.nik' => ['required', 'string'],
+            'rows.*.year' => ['nullable', 'integer', 'min:2024', 'max:2100'],
             'rows.*.adjustment_days' => ['required', 'numeric', 'between:-30,30', 'multiple_of:0.5'],
+            'rows.*.notes' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $year = (int) $validated['year'];
+        $defaultYear = isset($validated['year']) ? (int) $validated['year'] : null;
         $today = CarbonImmutable::now('Asia/Jakarta');
-        $asOf = $year <= $today->year ? $today : null;
         $updated = 0;
 
-        DB::transaction(function () use ($validated, $actor, $year, $asOf, &$updated): void {
-            $seenNiks = [];
+        DB::transaction(function () use ($validated, $actor, $defaultYear, $today, &$updated): void {
+            $seenKeys = [];
 
             foreach ($validated['rows'] as $idx => $row) {
                 $nikRaw = (string) $row['nik'];
@@ -546,13 +702,28 @@ class MasterDataController extends Controller
                     ]);
                 }
 
-                $nik = strtoupper(trim($nikRaw));
-                if (isset($seenNiks[$nik])) {
+                $notesRaw = isset($row['notes']) ? (string) $row['notes'] : '';
+                if ($notesRaw !== '' && $this->csvSanitizer->hasFormulaPrefix($notesRaw)) {
                     throw ValidationException::withMessages([
-                        'rows' => ['NIK duplikat dalam satu file pada baris '.($idx + 1).": {$nik}"],
+                        'rows' => ['Karakter formula berbahaya terdeteksi pada catatan baris '.($idx + 1).'.'],
                     ]);
                 }
-                $seenNiks[$nik] = true;
+
+                $rowYear = isset($row['year']) ? (int) $row['year'] : $defaultYear;
+                if ($rowYear === null) {
+                    throw ValidationException::withMessages([
+                        'rows' => ['Tahun wajib diisi pada baris '.($idx + 1).' atau pada parameter year.'],
+                    ]);
+                }
+
+                $nik = strtoupper(trim($nikRaw));
+                $dedupeKey = $nik.'|'.$rowYear;
+                if (isset($seenKeys[$dedupeKey])) {
+                    throw ValidationException::withMessages([
+                        'rows' => ['NIK duplikat untuk tahun yang sama pada baris '.($idx + 1).": {$nik} ({$rowYear})"],
+                    ]);
+                }
+                $seenKeys[$dedupeKey] = true;
 
                 $target = User::query()->where('nik', $nik)->first();
                 if ($target === null) {
@@ -565,11 +736,24 @@ class MasterDataController extends Controller
                     continue;
                 }
 
-                $bal = $this->balanceService->ensureBalanceForYear($target, $year, $asOf);
+                $evalDate = $rowYear <= $today->year
+                    ? $today
+                    : CarbonImmutable::create($rowYear, 12, 31, 0, 0, 0, 'Asia/Jakarta');
+                $adjustmentDays = (float) $row['adjustment_days'];
+
+                if ($adjustmentDays > 0.0 && ! $this->balanceService->isEligibleForAnnualLeave($target, $evalDate)) {
+                    throw ValidationException::withMessages([
+                        'rows' => ['Karyawan dengan masa kerja < 1 tahun tidak boleh diberi saldo positif pada baris '.($idx + 1).": {$nik}"],
+                    ]);
+                }
+
+                $asOf = $rowYear <= $today->year ? $today : null;
+                $bal = $this->balanceService->ensureBalanceForYear($target, $rowYear, $asOf);
                 $oldAdjustment = (float) $bal->adjustment_days;
 
-                $bal->update(['adjustment_days' => (float) $row['adjustment_days']]);
+                $bal->update(['adjustment_days' => $adjustmentDays]);
 
+                $rowNotes = trim($notesRaw);
                 $this->audit->log(
                     actorId: $actor->id,
                     entity: 'leave_balances',
@@ -577,7 +761,7 @@ class MasterDataController extends Controller
                     action: AuditAction::BULK_IMPORT,
                     oldValues: ['adjustment_days' => $oldAdjustment],
                     newValues: ['adjustment_days' => (float) $bal->adjustment_days],
-                    reason: 'Bulk import saldo awal cuti Talenta',
+                    reason: $rowNotes !== '' ? $rowNotes : 'Bulk import saldo awal cuti Talenta',
                 );
                 $updated++;
             }
@@ -617,21 +801,13 @@ class MasterDataController extends Controller
             ]);
         }
 
-        if ($targetDate === $todayLocal) {
-            $hasActiveToday = AttendanceLog::query()
-                ->where('user_id', $user->id)
-                ->whereDate('work_date', $targetDate)
-                ->where('is_active_attempt', 1)
-                ->exists();
-
-            if ($hasActiveToday) {
-                throw ValidationException::withMessages([
-                    'work_date' => ['Tidak dapat override jadwal hari ini karena karyawan sudah memiliki absensi aktif.'],
-                ]);
-            }
+        if ($targetDate === $todayLocal && $this->hasActiveAttendanceOrVisit($user->id, $targetDate)) {
+            throw ValidationException::withMessages([
+                'work_date' => ['Tidak dapat override jadwal hari ini karena karyawan sudah memiliki absensi atau kunjungan aktif.'],
+            ]);
         }
 
-        $schedule = DB::transaction(function () use ($user, $actor, $targetDate, $validated, $todayLocal, $replacementDate, $notes): UserShiftSchedule {
+        $schedule = DB::transaction(function () use ($user, $actor, $targetDate, $validated, $todayLocal, $timezone, $replacementDate, $notes): UserShiftSchedule {
             $existing = UserShiftSchedule::query()
                 ->where('user_id', $user->id)
                 ->whereDate('work_date', $targetDate)
@@ -655,6 +831,24 @@ class MasterDataController extends Controller
                 if ($replacementDate >= $targetDate || $replacementDate > $todayLocal) {
                     throw ValidationException::withMessages([
                         'replacement_for_date' => ['Tanggal asal ganti hari harus sebelum tanggal pengganti dan tidak melewati hari ini.'],
+                    ]);
+                }
+
+                $deadline25 = $this->gantiHariDeadline($replacementDate, $timezone);
+                if ($targetDate > $deadline25 || $todayLocal > $deadline25) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ["Hak ganti hari untuk tanggal {$replacementDate} melewati batas tanggal 25 ({$deadline25})."],
+                    ]);
+                }
+
+                $isCollectiveLeave = Holiday::query()
+                    ->whereDate('holiday_date', $replacementDate)
+                    ->where('holiday_type', HolidayType::COLLECTIVE_LEAVE)
+                    ->exists();
+
+                if ($isCollectiveLeave) {
+                    throw ValidationException::withMessages([
+                        'replacement_for_date' => ['Tanggal cuti bersama tidak dapat dijadikan asal ganti hari.'],
                     ]);
                 }
 
@@ -688,24 +882,31 @@ class MasterDataController extends Controller
                     ? SalesVisit::query()
                         ->where('user_id', $user->id)
                         ->whereDate('visit_date', $replacementDate)
-                        ->where('visit_status', '!=', VisitStatus::CANCELLED)
-                        ->whereIn('verification_status', [VerificationStatus::AUTO_APPROVED->value, VerificationStatus::APPROVED->value])
+                        ->where('verification_status', VerificationStatus::APPROVED)
+                        ->whereIn('visit_status', [VisitStatus::COMPLETED->value, VisitStatus::AUTO_CLOSED->value])
                         ->get()
                         ->first(fn (SalesVisit $visit): bool => in_array('OFF_DAY_ATTENDANCE', $visit->anomaly_flags ?? [], true))
                     : AttendanceLog::query()
                         ->where('user_id', $user->id)
                         ->whereDate('work_date', $replacementDate)
-                        ->whereIn('clock_in_status', [VerificationStatus::AUTO_APPROVED->value, VerificationStatus::APPROVED->value])
+                        ->where('clock_in_status', VerificationStatus::APPROVED)
+                        ->where('clock_out_status', VerificationStatus::APPROVED)
+                        ->whereNotNull('clock_out_at')
                         ->where('is_active_attempt', 1)
                         ->get()
                         ->first(fn (AttendanceLog $log): bool => in_array('OFF_DAY_ATTENDANCE', $log->clock_in_anomaly_flags ?? [], true));
 
                 if ($origin === null) {
                     throw ValidationException::withMessages([
-                        'replacement_for_date' => ['Tanggal asal tidak memiliki kehadiran libur yang sah dan disetujui.'],
+                        'replacement_for_date' => ['Tanggal asal tidak memiliki kehadiran libur 2 fase yang sah dan berstatus APPROVED.'],
                     ]);
                 }
             }
+
+            $existing ??= UserShiftSchedule::query()
+                ->where('user_id', $user->id)
+                ->whereDate('work_date', $targetDate)
+                ->first();
 
             $snapshotKeys = ['shift_id', 'is_day_off', 'source', 'notes', 'compensation_source_type', 'compensation_source_id', 'compensation_source_date'];
 
@@ -723,7 +924,7 @@ class MasterDataController extends Controller
 
             if ($existing !== null) {
                 $existing->update($attributes);
-                $saved = $existing->fresh();
+                $saved = $existing->refresh();
             } else {
                 $saved = UserShiftSchedule::query()->create(array_merge(
                     ['user_id' => $user->id, 'work_date' => $targetDate],
@@ -746,6 +947,132 @@ class MasterDataController extends Controller
         });
 
         return response()->json(['schedule' => $schedule]);
+    }
+
+    public function cancelScheduleOverride(Request $request, User $user): JsonResponse
+    {
+        /** @var User $actor */
+        $actor = $request->user();
+
+        if ($user->id === $actor->id) {
+            abort(403, 'Dilarang membatalkan jadwal milik sendiri.');
+        }
+
+        $validated = $request->validate([
+            'work_date' => ['required', 'date'],
+            'reason' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $timezone = $user->officeLocation->timezone ?? 'Asia/Jakarta';
+        $todayLocal = CarbonImmutable::now('UTC')->setTimezone($timezone)->toDateString();
+        $targetDate = (string) $validated['work_date'];
+        $reason = trim((string) ($validated['reason'] ?? ''));
+
+        if ($targetDate < $todayLocal) {
+            throw ValidationException::withMessages([
+                'work_date' => ['Pembatalan override hanya diperbolehkan untuk tanggal >= hari ini.'],
+            ]);
+        }
+
+        if ($this->hasActiveAttendanceOrVisit($user->id, $targetDate)) {
+            throw ValidationException::withMessages([
+                'work_date' => ['Tidak dapat membatalkan jadwal karena karyawan sudah memiliki absensi atau kunjungan aktif pada tanggal tersebut.'],
+            ]);
+        }
+
+        DB::transaction(function () use ($user, $actor, $targetDate, $timezone, $reason): void {
+            $existing = UserShiftSchedule::query()
+                ->where('user_id', $user->id)
+                ->whereDate('work_date', $targetDate)
+                ->where('source', ScheduleSource::MANUAL_OVERRIDE)
+                ->first();
+
+            if ($existing === null) {
+                throw ValidationException::withMessages([
+                    'work_date' => ['Jadwal override manual pada tanggal tersebut tidak ditemukan.'],
+                ]);
+            }
+
+            $snapshotKeys = ['shift_id', 'is_day_off', 'source', 'notes', 'compensation_source_type', 'compensation_source_id', 'compensation_source_date'];
+            $old = $existing->only($snapshotKeys);
+            $recordId = $existing->id;
+
+            $pattern = $user->default_shift_pattern_id !== null
+                ? ShiftPattern::query()->find($user->default_shift_pattern_id)
+                : null;
+
+            if ($pattern !== null) {
+                $isoDay = CarbonImmutable::parse($targetDate, $timezone)->dayOfWeekIso;
+                $patternShiftId = match ($isoDay) {
+                    1 => $pattern->mon_shift_id,
+                    2 => $pattern->tue_shift_id,
+                    3 => $pattern->wed_shift_id,
+                    4 => $pattern->thu_shift_id,
+                    5 => $pattern->fri_shift_id,
+                    6 => $pattern->sat_shift_id,
+                    7 => $pattern->sun_shift_id,
+                    default => null,
+                };
+
+                $existing->update([
+                    'shift_id' => $patternShiftId,
+                    'is_day_off' => $patternShiftId === null,
+                    'source' => ScheduleSource::PATTERN,
+                    'compensation_source_type' => null,
+                    'compensation_source_id' => null,
+                    'compensation_source_date' => null,
+                    'notes' => null,
+                    'created_by' => null,
+                ]);
+                $newValues = $existing->refresh()->only($snapshotKeys);
+            } else {
+                $existing->delete();
+                $newValues = null;
+            }
+
+            $this->balanceService->recalculateLeaveRequestDays($targetDate, $user->id);
+
+            $this->audit->log(
+                actorId: $actor->id,
+                entity: 'user_shift_schedules',
+                recordId: $recordId,
+                action: AuditAction::UPDATE,
+                oldValues: $old,
+                newValues: $newValues,
+                reason: $reason !== '' ? $reason : 'Pembatalan override / ganti hari jadwal',
+            );
+        });
+
+        return response()->json(['cancelled' => true]);
+    }
+
+    private function gantiHariDeadline(string $sourceDate, string $timezone): string
+    {
+        $date = CarbonImmutable::parse($sourceDate, $timezone);
+
+        return $date->day <= 24
+            ? $date->setDay(25)->toDateString()
+            : $date->addMonthNoOverflow()->setDay(25)->toDateString();
+    }
+
+    private function hasActiveAttendanceOrVisit(int $userId, string $date): bool
+    {
+        $hasActiveAttendance = AttendanceLog::query()
+            ->where('user_id', $userId)
+            ->whereDate('work_date', $date)
+            ->where('is_active_attempt', 1)
+            ->exists();
+
+        if ($hasActiveAttendance) {
+            return true;
+        }
+
+        return SalesVisit::query()
+            ->where('user_id', $userId)
+            ->whereDate('visit_date', $date)
+            ->where('visit_status', '!=', VisitStatus::CANCELLED)
+            ->where('verification_status', '!=', VerificationStatus::REJECTED)
+            ->exists();
     }
 
     public function storeHoliday(Request $request): JsonResponse
@@ -1438,43 +1765,6 @@ class MasterDataController extends Controller
 
         return response()->json([
             'pattern' => $shiftPattern->fresh(),
-            'generated_rows' => $generatedRows,
-        ]);
-    }
-
-    public function generateSchedulesForPattern(Request $request, ShiftPattern $shiftPattern): JsonResponse
-    {
-        /** @var User $actor */
-        $actor = $request->user();
-
-        if (! $shiftPattern->is_active) {
-            throw ValidationException::withMessages([
-                'pattern' => ['Tidak dapat men-generate jadwal dari pola yang nonaktif.'],
-            ]);
-        }
-
-        $users = User::query()
-            ->with('officeLocation')
-            ->where('default_shift_pattern_id', $shiftPattern->id)
-            ->where('is_active', true)
-            ->get();
-
-        $generatedRows = 0;
-        foreach ($users as $u) {
-            $generatedRows += $this->scheduleGenerator->generateForUser($u);
-        }
-
-        $this->audit->log(
-            actorId: $actor->id,
-            entity: 'shift_patterns',
-            recordId: $shiftPattern->id,
-            action: AuditAction::UPDATE,
-            newValues: ['generated_rows' => $generatedRows, 'users_count' => $users->count()],
-            reason: 'Generate jadwal 90 hari ke depan',
-        );
-
-        return response()->json([
-            'users_count' => $users->count(),
             'generated_rows' => $generatedRows,
         ]);
     }

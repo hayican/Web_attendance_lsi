@@ -25,7 +25,7 @@
     <Heading
         variant="small"
         title="Tampilan"
-        description="Pilih mode tampilan akun Anda."
+        description="Aplikasi ini menggunakan Mode Terang sebagai standar tampilan corporate PT. LSI."
     />
     <AppearanceTabs />
 </div>

@@ -7,6 +7,7 @@ use App\Enums\VisitStatus;
 use App\Models\AttendanceLog;
 use App\Models\SalesVisit;
 use App\Models\Shift;
+use App\Services\LeaveBalanceService;
 use App\Services\ScheduleResolverService;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
@@ -17,16 +18,17 @@ class CloseMissedAttendanceCommand extends Command
 
     protected $description = 'Close missed office clock-outs and stale sales visits (idempotent catch-up)';
 
-    public function handle(ScheduleResolverService $scheduleResolver): int
+    public function handle(ScheduleResolverService $scheduleResolver, LeaveBalanceService $balanceService): int
     {
         $nowUtc = CarbonImmutable::now('UTC');
         $closedLogs = 0;
         $closedVisits = 0;
 
         $openLogs = AttendanceLog::query()
-            ->with(['location', 'shift', 'leaveRequest'])
+            ->with(['user.officeLocation', 'location', 'shift', 'leaveRequest'])
             ->where('is_active_attempt', 1)
             ->whereNull('clock_out_at')
+            ->whereNull('clock_out_status')
             ->get();
 
         foreach ($openLogs as $log) {
@@ -35,20 +37,28 @@ class CloseMissedAttendanceCommand extends Command
             $workDate = $log->work_date->toDateString();
             $nowLocal = $nowUtc->setTimezone($timezone);
 
-            /** @var Shift|null $shift */
-            $shift = $log->shift;
-
-            $effectiveEnd = $log->schedule_end_time !== null
-                ? CarbonImmutable::parse("{$workDate} {$log->schedule_end_time}", $timezone)
-                : $scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $log->leaveRequest);
-            // @phpstan-ignore nullsafe.neverNull (Larastan treats the nullable shift relation as non-null)
-            $autoCloseHours = $log->auto_close_hours ?? $log->shift?->auto_close_hours ?? 5;
-
             $endOfDay = CarbonImmutable::parse("{$workDate} 23:59:00", $timezone);
-            $deadline = $effectiveEnd !== null
-                ? $effectiveEnd->addHours($autoCloseHours)
-                : $endOfDay;
-            $deadline = $deadline->greaterThan($endOfDay) ? $endOfDay : $deadline;
+            $isEffectiveWorkDay = $balanceService->isEffectiveWorkDay($log->user, $workDate);
+
+            if (! $isEffectiveWorkDay && $log->leaveRequest === null) {
+                $deadline = $endOfDay;
+            } else {
+                /** @var Shift|null $shift */
+                $shift = $log->shift;
+
+                $effectiveEnd = $log->leaveRequest !== null
+                    ? $scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $log->leaveRequest)
+                    : ($log->schedule_end_time !== null
+                        ? CarbonImmutable::parse("{$workDate} {$log->schedule_end_time}", $timezone)
+                        : $scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, null));
+                // @phpstan-ignore nullsafe.neverNull (Larastan treats the nullable shift relation as non-null)
+                $autoCloseHours = $log->auto_close_hours ?? $log->shift?->auto_close_hours ?? 5;
+
+                $deadline = $effectiveEnd !== null
+                    ? $effectiveEnd->addHours($autoCloseHours)
+                    : $endOfDay;
+                $deadline = $deadline->greaterThan($endOfDay) ? $endOfDay : $deadline;
+            }
 
             if ($nowLocal->greaterThanOrEqualTo($deadline)) {
                 $flags = $log->clock_out_anomaly_flags ?? [];

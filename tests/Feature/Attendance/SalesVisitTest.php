@@ -1,5 +1,8 @@
 <?php
 
+use App\Enums\LeaveDayStatus;
+use App\Enums\LeaveStatus;
+use App\Enums\LeaveType;
 use App\Enums\LocationStatus;
 use App\Enums\LocationType;
 use App\Enums\ScheduleSource;
@@ -8,6 +11,8 @@ use App\Enums\VerificationStatus;
 use App\Enums\VisitStatus;
 use App\Http\Middleware\EnsureDeviceCookie;
 use App\Models\ActivityCategory;
+use App\Models\LeaveRequest;
+use App\Models\LeaveRequestDay;
 use App\Models\Location;
 use App\Models\SalesVisit;
 use App\Models\User;
@@ -505,6 +510,7 @@ test('sales visit on a manual day off adds OFF_DAY_ATTENDANCE', function () {
             'gps_session_token' => $gps['token'],
             'camera_token' => $cam['token'],
             'photo' => UploadedFile::fake()->image('visit.jpg', 320, 240),
+            'notes' => 'Kunjungan khusus hari libur atas permintaan pelanggan',
         ])->assertCreated()
         ->assertJsonPath('visit.verification_status', VerificationStatus::PENDING_REVIEW->value);
 
@@ -541,6 +547,453 @@ test('sales NOO daily quota follows the branch calendar day, not the UTC date', 
         'accuracy_m' => 10,
         'confirm_duplicate' => true,
     ])->assertUnprocessable()->assertJsonValidationErrors('noo');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales visit-in on day off requires notes of at least 10 chars and page exposes isDayOff', function () {
+    Storage::fake('local');
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-24 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $outlet = Location::factory()->create([
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+    ]);
+
+    UserShiftSchedule::query()->create([
+        'user_id' => $sales->id,
+        'work_date' => '2026-11-24',
+        'shift_id' => null,
+        'is_day_off' => true,
+        'source' => ScheduleSource::MANUAL_OVERRIDE,
+    ]);
+
+    $this->actingAs($sales)
+        ->get('/attendance/sales')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->where('isDayOff', true)
+        );
+
+    $tokens = app(TokenGuardService::class);
+    $gps = $tokens->issueGpsSessionToken($sales->id);
+    $cam = $tokens->issueCameraToken($sales->id);
+
+    $this->actingAs($sales)
+        ->postJson('/attendance/sales/visit-in', [
+            'idempotency_key' => (string) Str::uuid(),
+            'outlet_location_id' => $outlet->id,
+            'lat' => -6.2000000,
+            'lng' => 106.8166667,
+            'accuracy_m' => 10,
+            'gps_session_token' => $gps['token'],
+            'camera_token' => $cam['token'],
+            'photo' => UploadedFile::fake()->image('visit.jpg', 320, 240),
+            'notes' => 'kurang',
+        ])->assertUnprocessable()
+        ->assertJsonValidationErrors('notes');
+
+    // Tokens must remain valid after 422
+    $this->actingAs($sales)
+        ->postJson('/attendance/sales/visit-in', [
+            'idempotency_key' => (string) Str::uuid(),
+            'outlet_location_id' => $outlet->id,
+            'lat' => -6.2000000,
+            'lng' => 106.8166667,
+            'accuracy_m' => 10,
+            'gps_session_token' => $gps['token'],
+            'camera_token' => $cam['token'],
+            'photo' => UploadedFile::fake()->image('visit.jpg', 320, 240),
+            'notes' => 'Kunjungan hari libur untuk pengiriman mendesak',
+        ])->assertCreated();
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales visit-out rejects inactive activity category and auto-closes stale prior-day visits', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-24 09:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $outlet = Location::factory()->create([
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+    ]);
+    $inactiveCategory = ActivityCategory::query()->create([
+        'name' => 'Kategori Nonaktif',
+        'is_active' => false,
+        'exempt_short_duration' => false,
+    ]);
+    $activeCategory = ActivityCategory::query()->create([
+        'name' => 'Follow Up Aktif',
+        'is_active' => true,
+        'exempt_short_duration' => false,
+    ]);
+
+    $staleVisit = SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outlet->id,
+        'outlet_lat' => $outlet->latitude,
+        'outlet_lng' => $outlet->longitude,
+        'outlet_radius_m' => $outlet->radius_m,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 15:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::IN_PROGRESS,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+    ]);
+
+    $tokens = app(TokenGuardService::class);
+    $gps = $tokens->issueGpsSessionToken($sales->id);
+
+    // 1. Inactive category rejected with 422
+    $this->actingAs($sales)
+        ->postJson("/attendance/sales/{$staleVisit->id}/visit-out", [
+            'idempotency_key' => (string) Str::uuid(),
+            'activity_category_id' => $inactiveCategory->id,
+            'visit_notes' => 'Follow up order toko minggu ini',
+            'lat' => -6.2000000,
+            'lng' => 106.8166667,
+            'accuracy_m' => 10,
+            'gps_session_token' => $gps['token'],
+        ])->assertUnprocessable()
+        ->assertJsonValidationErrors('activity_category_id');
+
+    // 2. Stale prior-day visit auto-closed and rejected with 422
+    $this->actingAs($sales)
+        ->postJson("/attendance/sales/{$staleVisit->id}/visit-out", [
+            'idempotency_key' => (string) Str::uuid(),
+            'activity_category_id' => $activeCategory->id,
+            'visit_notes' => 'Follow up order toko minggu ini',
+            'lat' => -6.2000000,
+            'lng' => 106.8166667,
+            'accuracy_m' => 10,
+            'gps_session_token' => $gps['token'],
+        ])->assertUnprocessable()
+        ->assertJsonValidationErrors('visit');
+
+    expect($staleVisit->fresh()->visit_status)->toBe(VisitStatus::AUTO_CLOSED)
+        ->and($staleVisit->fresh()->anomaly_flags)->toContain('MISSED_VISIT_OUT');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales visit page orders recentOutlets by recency, excludes other sales pending NOO, and uses activeVisit radius snapshot', function () {
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $otherSales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+
+    $outletFirst = Location::factory()->create([
+        'name' => 'Toko Pertama',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::ACTIVE,
+        'radius_m' => 100,
+    ]);
+    $outletSecond = Location::factory()->create([
+        'name' => 'Toko Kedua',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::ACTIVE,
+        'radius_m' => 100,
+    ]);
+    $ownPending = Location::factory()->create([
+        'name' => 'Toko NOO Sendiri',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::PENDING_VERIFICATION,
+        'created_by' => $sales->id,
+        'radius_m' => 100,
+    ]);
+    $otherPending = Location::factory()->create([
+        'name' => 'Toko NOO Sales Lain',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::PENDING_VERIFICATION,
+        'created_by' => $otherSales->id,
+        'radius_m' => 100,
+    ]);
+
+    // Visit order intentionally differs from primary key order: otherPending -> outletFirst -> ownPending -> outletSecond
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $otherPending->id,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 06:30:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::COMPLETED,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+    ]);
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outletFirst->id,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 07:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::COMPLETED,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+    ]);
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $ownPending->id,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 08:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::COMPLETED,
+        'verification_status' => VerificationStatus::PENDING_REVIEW,
+    ]);
+    SalesVisit::query()->create([
+        'user_id' => $sales->id,
+        'outlet_location_id' => $outletSecond->id,
+        'outlet_lat' => $outletSecond->latitude,
+        'outlet_lng' => $outletSecond->longitude,
+        'outlet_radius_m' => 100,
+        'visit_date' => '2026-11-23',
+        'visit_in_at' => CarbonImmutable::parse('2026-11-23 09:00:00', 'Asia/Jakarta')->utc(),
+        'visit_status' => VisitStatus::IN_PROGRESS,
+        'verification_status' => VerificationStatus::AUTO_APPROVED,
+    ]);
+
+    // HR edits master radius while visit is IN_PROGRESS
+    $outletSecond->update(['radius_m' => 250]);
+
+    $this->actingAs($sales)
+        ->get('/attendance/sales')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->where('activeVisit.outlet_radius_m', 100)
+            ->has('recentOutlets', 3)
+            ->where('recentOutlets.0.id', $outletSecond->id)
+            ->where('recentOutlets.1.id', $ownPending->id)
+            ->where('recentOutlets.2.id', $outletFirst->id)
+        );
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales visit-out completes with UNVERIFIED_OUTLET when NOO is rejected mid-visit and validates distance via snapshot', function () {
+    Storage::fake('local');
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $nooOutlet = Location::factory()->create([
+        'name' => 'Toko NOO Baru',
+        'type' => LocationType::OUTLET,
+        'status' => LocationStatus::PENDING_VERIFICATION,
+        'created_by' => $sales->id,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+    ]);
+    $category = ActivityCategory::query()->create([
+        'name' => 'Kunjungan Perdana',
+        'exempt_short_duration' => false,
+        'is_active' => true,
+    ]);
+
+    $tokens = app(TokenGuardService::class);
+    $g1 = $tokens->issueGpsSessionToken($sales->id);
+    $c1 = $tokens->issueCameraToken($sales->id);
+
+    $visitIn = $this->actingAs($sales)->postJson('/attendance/sales/visit-in', [
+        'idempotency_key' => (string) Str::uuid(),
+        'outlet_location_id' => $nooOutlet->id,
+        'lat' => -6.2000000,
+        'lng' => 106.8166667,
+        'accuracy_m' => 10,
+        'gps_session_token' => $g1['token'],
+        'camera_token' => $c1['token'],
+        'photo' => UploadedFile::fake()->image('noo.jpg', 320, 240),
+        'notes' => 'Kunjungan toko baru pertama kali',
+    ])->assertCreated();
+
+    $visitId = (int) $visitIn->json('visit.id');
+
+    // HR rejects NOO to INACTIVE and mutates master coords/radius while visit is still IN_PROGRESS
+    $nooOutlet->update([
+        'status' => LocationStatus::INACTIVE,
+        'reject_reason' => 'Duplikat toko eksisting',
+        'latitude' => -6.3000000,
+        'longitude' => 106.9000000,
+        'radius_m' => 10,
+    ]);
+
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:15:00', 'Asia/Jakarta'));
+    $gOut = $tokens->issueGpsSessionToken($sales->id);
+
+    $visitOut = $this->actingAs($sales)->postJson("/attendance/sales/{$visitId}/visit-out", [
+        'idempotency_key' => (string) Str::uuid(),
+        'activity_category_id' => $category->id,
+        'visit_notes' => 'Selesai perkenalan produk',
+        'lat' => -6.2000000,
+        'lng' => 106.8166667,
+        'accuracy_m' => 10,
+        'gps_session_token' => $gOut['token'],
+    ])->assertOk();
+
+    expect($visitOut->json('visit.visit_status'))->toBe(VisitStatus::COMPLETED->value)
+        ->and($visitOut->json('visit.verification_status'))->toBe(VerificationStatus::PENDING_REVIEW->value)
+        ->and($visitOut->json('visit.anomaly_flags'))->toContain('UNVERIFIED_OUTLET')
+        ->and($visitOut->json('visit.anomaly_flags'))->not->toContain('OUT_OF_RADIUS');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('sales visit-in rejects distance beyond max(200m, R) and blocks during approved time off', function () {
+    Storage::fake('local');
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $outlet = Location::factory()->create([
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+    ]);
+
+    $tokens = app(TokenGuardService::class);
+    $g1 = $tokens->issueGpsSessionToken($sales->id);
+    $c1 = $tokens->issueCameraToken($sales->id);
+
+    // ~333m away (> max(200, 100)) -> hard-blocked 422
+    $this->actingAs($sales)->postJson('/attendance/sales/visit-in', [
+        'idempotency_key' => (string) Str::uuid(),
+        'outlet_location_id' => $outlet->id,
+        'lat' => -6.2030000,
+        'lng' => 106.8166667,
+        'accuracy_m' => 10,
+        'gps_session_token' => $g1['token'],
+        'camera_token' => $c1['token'],
+        'photo' => UploadedFile::fake()->image('far.jpg', 320, 240),
+        'notes' => 'Jarak terlalu jauh dari lokasi toko',
+    ])->assertUnprocessable()->assertJsonValidationErrors('location');
+
+    $leave = LeaveRequest::query()->create([
+        'user_id' => $sales->id,
+        'type' => LeaveType::CUTI,
+        'start_date' => '2026-11-23',
+        'end_date' => '2026-11-23',
+        'total_days' => 1.0,
+        'reason' => 'Cuti tahunan',
+        'status' => LeaveStatus::APPROVED,
+    ]);
+    LeaveRequestDay::query()->create([
+        'leave_request_id' => $leave->id,
+        'user_id' => $sales->id,
+        'leave_date' => '2026-11-23',
+        'day_value' => 1.0,
+        'status' => LeaveDayStatus::APPROVED,
+    ]);
+
+    // Inside radius, but blocked because of APPROVED CUTI today
+    $this->actingAs($sales)->postJson('/attendance/sales/visit-in', [
+        'idempotency_key' => (string) Str::uuid(),
+        'outlet_location_id' => $outlet->id,
+        'lat' => -6.2000000,
+        'lng' => 106.8166667,
+        'accuracy_m' => 10,
+        'gps_session_token' => $g1['token'],
+        'camera_token' => $c1['token'],
+        'photo' => UploadedFile::fake()->image('leave.jpg', 320, 240),
+    ])->assertUnprocessable()->assertJsonValidationErrors('visit');
+
+    CarbonImmutable::setTestNow();
+});
+
+test('cancelled sales visit is excluded from IMPOSSIBLE_TRAVEL calculation', function () {
+    Storage::fake('local');
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:00:00', 'Asia/Jakarta'));
+
+    $office = Location::factory()->create(['type' => LocationType::OFFICE, 'timezone' => 'Asia/Jakarta']);
+    $sales = User::factory()->create([
+        'role' => UserRole::EMPLOYEE_SALES,
+        'office_location_id' => $office->id,
+        'default_shift_pattern_id' => null,
+    ]);
+    $bandungOutlet = Location::factory()->create([
+        'name' => 'Toko Bandung',
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.9174639,
+        'longitude' => 107.6191228,
+        'radius_m' => 100,
+    ]);
+    $jakartaOutlet = Location::factory()->create([
+        'name' => 'Toko Jakarta',
+        'type' => LocationType::OUTLET,
+        'latitude' => -6.2000000,
+        'longitude' => 106.8166667,
+        'radius_m' => 100,
+    ]);
+
+    $tokens = app(TokenGuardService::class);
+    $deviceId = (string) Str::uuid();
+    $g1 = $tokens->issueGpsSessionToken($sales->id);
+    $c1 = $tokens->issueCameraToken($sales->id);
+
+    $firstVisit = $this->actingAs($sales)
+        ->withCookie(EnsureDeviceCookie::COOKIE_NAME, $deviceId)
+        ->postJson('/attendance/sales/visit-in', [
+            'idempotency_key' => (string) Str::uuid(),
+            'outlet_location_id' => $bandungOutlet->id,
+            'lat' => -6.9174639,
+            'lng' => 107.6191228,
+            'accuracy_m' => 10,
+            'gps_session_token' => $g1['token'],
+            'camera_token' => $c1['token'],
+            'photo' => UploadedFile::fake()->image('bandung.jpg', 320, 240),
+        ])->assertCreated();
+
+    $this->actingAs($sales)
+        ->postJson('/attendance/sales/'.$firstVisit->json('visit.id').'/cancel', [
+            'cancel_reason' => 'Salah pilih toko di daftar',
+        ])->assertOk()->assertJsonPath('visit.visit_status', VisitStatus::CANCELLED->value);
+
+    // 2 minutes later in Jakarta (~120km away): must NOT trigger IMPOSSIBLE_TRAVEL
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-11-23 10:02:00', 'Asia/Jakarta'));
+    $g2 = $tokens->issueGpsSessionToken($sales->id);
+    $c2 = $tokens->issueCameraToken($sales->id);
+
+    $secondVisit = $this->actingAs($sales)
+        ->withCookie(EnsureDeviceCookie::COOKIE_NAME, $deviceId)
+        ->postJson('/attendance/sales/visit-in', [
+            'idempotency_key' => (string) Str::uuid(),
+            'outlet_location_id' => $jakartaOutlet->id,
+            'lat' => -6.2000000,
+            'lng' => 106.8166667,
+            'accuracy_m' => 10,
+            'gps_session_token' => $g2['token'],
+            'camera_token' => $c2['token'],
+            'photo' => UploadedFile::fake()->image('jakarta.jpg', 320, 240),
+        ])->assertCreated();
+
+    expect($secondVisit->json('visit.verification_status'))->toBe(VerificationStatus::AUTO_APPROVED->value)
+        ->and($secondVisit->json('visit.anomaly_flags') ?? [])->not->toContain('IMPOSSIBLE_TRAVEL');
 
     CarbonImmutable::setTestNow();
 });

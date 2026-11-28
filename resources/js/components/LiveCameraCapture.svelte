@@ -22,6 +22,7 @@
     let errorMessage = $state<string | null>(null);
     let busy = $state(false);
     let previewUrl = $state<string | null>(null);
+    let capturedSizeKb = $state<number | null>(null);
     let destroyed = false;
 
     async function startCamera() {
@@ -98,7 +99,7 @@
                 URL.revokeObjectURL(previewUrl);
             }
             previewUrl = URL.createObjectURL(blob);
-
+            capturedSizeKb = Math.max(1, Math.round(blob.size / 1024));
             const tokenToEmit = cameraToken;
             stopStream();
             onCapture({ blob, cameraToken: tokenToEmit });
@@ -171,11 +172,22 @@
         </Button>
     {:else}
         {#if previewUrl}
-            <img
-                src={previewUrl}
-                alt="Hasil foto kamera"
-                class="aspect-3/4 max-h-72 w-full rounded-lg border object-cover"
-            />
+            <div class="space-y-1">
+                <img
+                    src={previewUrl}
+                    alt="Hasil foto kamera"
+                    class="aspect-3/4 max-h-72 w-full rounded-lg border object-cover"
+                />
+                {#if capturedSizeKb !== null}
+                    <p
+                        class="text-right font-mono text-[11px] tabular-nums {capturedSizeKb < 300
+                            ? 'text-green-700'
+                            : 'text-yellow-800'}"
+                    >
+                        Ukuran berkas: {capturedSizeKb} KB (&lt; 300 KB)
+                    </p>
+                {/if}
+            </div>
         {/if}
 
         <Button

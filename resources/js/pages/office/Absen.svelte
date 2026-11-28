@@ -49,7 +49,6 @@
 
     type OfficeProps = {
         office: {
-            id: number;
             name: string;
             radius_m: number;
             timezone: string;
@@ -76,6 +75,7 @@
         effectiveStartIso: string | null;
         effectiveEndIso: string | null;
         closeDeadlineIso: string | null;
+        retryDeadlineIso?: string | null;
         activeLog: AttendanceSummary | null;
         rejectedLog: AttendanceSummary | null;
         canRetryRejected: boolean;
@@ -104,6 +104,7 @@
         effectiveStartIso,
         effectiveEndIso,
         closeDeadlineIso,
+        retryDeadlineIso = null,
         activeLog,
         rejectedLog,
         canRetryRejected,
@@ -120,19 +121,19 @@
     const toneNeutral = 'border-stone-300 bg-stone-100 text-stone-700';
 
     const flagLabels: Record<string, string> = {
-        OUT_OF_RADIUS: 'Luar Radius',
-        UNCERTAIN_ACCURACY: 'Akurasi Tidak Pasti',
-        LOW_ACCURACY: 'Akurasi Rendah',
-        SHARED_DEVICE: 'Perangkat Bersama',
-        EARLY_LEAVE: 'Pulang Awal',
-        LATE_PERMISSION: 'Izin Masuk Siang',
-        MISSED_CLOCK_OUT: 'Lupa Clock-Out',
-        OFFSITE_DUTY: 'Dinas Luar',
-        OFF_DAY_ATTENDANCE: 'Absen Hari Libur',
-        IMPOSSIBLE_TRAVEL: 'Perjalanan Tidak Wajar',
-        REPEATED_COORDS: 'Koordinat Berulang',
-        CONSTANT_ACCURACY: 'Akurasi Konstan',
-        STALE_TIMESTAMP: 'Token Kedaluwarsa',
+        OUT_OF_RADIUS: 'Di luar radius',
+        UNCERTAIN_ACCURACY: 'Akurasi GPS meragukan',
+        LOW_ACCURACY: 'Sinyal GPS lemah',
+        SHARED_DEVICE: 'Perangkat dipakai bersama',
+        EARLY_LEAVE: 'Pulang lebih awal',
+        LATE_PERMISSION: 'Izin masuk siang',
+        MISSED_CLOCK_OUT: 'Belum Clock-Out',
+        OFFSITE_DUTY: 'Dinas luar',
+        OFF_DAY_ATTENDANCE: 'Hadir di hari libur',
+        IMPOSSIBLE_TRAVEL: 'Perpindahan lokasi terlalu cepat',
+        REPEATED_COORDS: 'Titik GPS berulang',
+        CONSTANT_ACCURACY: 'Akurasi GPS selalu sama',
+        STALE_TIMESTAMP: 'Data GPS kedaluwarsa',
     };
 
     function verificationMeta(status: VerificationStatus | null): {
@@ -141,15 +142,15 @@
     } {
         switch (status) {
             case 'AUTO_APPROVED':
-                return { label: 'Sah Otomatis', className: `${badgeBase} ${toneSuccess}` };
+                return { label: 'Otomatis disetujui', className: `${badgeBase} ${toneSuccess}` };
             case 'APPROVED':
                 return { label: 'Disetujui', className: `${badgeBase} ${toneSuccess}` };
             case 'PENDING_REVIEW':
-                return { label: 'Menunggu Review', className: `${badgeBase} ${toneWarning}` };
+                return { label: 'Menunggu cek HR', className: `${badgeBase} ${toneWarning}` };
             case 'REJECTED':
                 return { label: 'Ditolak', className: `${badgeBase} ${toneError}` };
             default:
-                return { label: 'Belum Absen', className: `${badgeBase} ${toneWarning}` };
+                return { label: 'Belum absen', className: `${badgeBase} ${toneWarning}` };
         }
     }
 
@@ -201,7 +202,7 @@
         const ms = toMs(iso);
 
         if (ms === null) {
-            return '—';
+            return '-';
         }
 
         return new Intl.DateTimeFormat('id-ID', {
@@ -242,6 +243,7 @@
     let notes = $state('');
     let latePermission = $state(false);
     let submitting = $state(false);
+    let pendingIdempotencyKey = $state<string | null>(null);
     let cameraKey = $state(0);
     let sheetOpen = $state(false);
     let feedback = $state<{
@@ -308,8 +310,9 @@
 
     const effectiveStartMs = $derived(toMs(effectiveStartIso));
     const effectiveEndMs = $derived(toMs(effectiveEndIso));
-    const closeDeadlineMs = $derived(toMs(closeDeadlineIso));
-
+    const effectiveRetryDeadlineIso = $derived(
+        retryDeadlineIso ?? effectiveEndIso ?? closeDeadlineIso,
+    );
     const lateCutoffMs = $derived(
         effectiveStartMs !== null && shift !== null
             ? effectiveStartMs + shift.grace_period_minutes * 60000
@@ -388,12 +391,19 @@
     const isOutsideRadius = $derived(
         distanceM !== null && distanceM > office.radius_m,
     );
+    const isInsideRadius = $derived(
+        distanceM !== null && distanceM <= office.radius_m,
+    );
     const isAccuracyPoor = $derived(
         accuracyM !== null &&
             (accuracyM > 100 || accuracyM > office.radius_m),
     );
 
     const geoRequiresNotes = $derived.by(() => {
+        if (!isClockOutMode && isInsideRadius) {
+            return false;
+        }
+
         if (dinasLuar !== null) {
             return accuracyM !== null && accuracyM > 100;
         }
@@ -434,34 +444,37 @@
 
         if (isHardBlocked) {
             return {
-                label: `Di luar jangkauan (maks ${hardBlockLimit} m). Mendekat ke kantor dulu.`,
+                label: `Terlalu jauh dari kantor (batas ${hardBlockLimit} m). Mendekat dulu untuk absen.`,
                 className: 'font-medium text-red-700',
             };
         }
 
         if (dinasLuar !== null) {
             return {
-                label: 'Mode Dinas Luar — blokir radius dibuka, absen masuk review HR.',
+                label: 'Mode dinas luar aktif. Absen Anda akan dicek HR.',
                 className: 'font-medium text-blue-700',
             };
         }
 
         if (isOutsideRadius) {
             return {
-                label: 'Di luar radius kantor — wajib isi alasan.',
+                label: 'Anda di luar radius kantor. Wajib tulis alasan.',
                 className: 'font-medium text-yellow-800',
             };
         }
 
         if (isAccuracyPoor) {
             return {
-                label: 'Sinyal GPS kurang akurat — wajib isi alasan.',
+                label:
+                    !isClockOutMode && !isOutsideRadius
+                        ? 'Di dalam radius kantor (sinyal GPS lemah, catatan opsional).'
+                        : 'Sinyal GPS lemah. Wajib tulis alasan.',
                 className: 'font-medium text-yellow-800',
             };
         }
 
         return {
-            label: 'Di dalam radius kantor.',
+            label: 'Anda di dalam radius kantor.',
             className: 'font-medium text-green-700',
         };
     });
@@ -470,27 +483,27 @@
         const reasons: string[] = [];
 
         if (geoRequiresNotes) {
-            reasons.push('Lokasi atau akurasi GPS di luar toleransi');
+            reasons.push('Lokasi di luar radius atau sinyal GPS lemah');
         }
 
-        if (isDayOff) {
-            reasons.push('Absen pada hari OFF/libur (lembur)');
+        if (isDayOff && dinasLuar === null && (isClockOutMode || !isInsideRadius)) {
+            reasons.push('Masuk di hari libur (lembur)');
         }
 
         if (isEarlyLeave) {
             reasons.push(`Pulang ${earlyLeaveMinutes} menit lebih awal`);
         }
 
-        if (isRetryAfterEnd) {
-            reasons.push('Absen ulang setelah jam shift berakhir');
+        if (isRetryAfterEnd && !isInsideRadius) {
+            reasons.push('Absen ulang setelah jam shift selesai');
         }
 
         if (clockOutRetryAfterEnd) {
-            reasons.push('Clock-Out pada percobaan absen ulang');
+            reasons.push('Clock-Out dari absen ulang');
         }
 
         if (latePermission) {
-            reasons.push('Izin masuk siang: alasan minimal 10 karakter');
+            reasons.push('Izin masuk siang (alasan minimal 10 karakter)');
         }
 
         return reasons;
@@ -499,23 +512,27 @@
     const requiresNotes = $derived(notesReasons.length > 0);
 
     const notesPlaceholder = $derived.by(() => {
+        if (!requiresNotes) {
+            return 'Tulis catatan tambahan (opsional)...';
+        }
+
         if (isEarlyLeave) {
-            return 'Alasan pulang lebih awal (wajib diisi)…';
+            return 'Tulis alasan pulang lebih awal...';
         }
 
         if (geoRequiresNotes) {
-            return 'Alasan lokasi/akurasi GPS (wajib diisi)…';
+            return 'Tulis alasan lokasi atau sinyal GPS...';
         }
 
-        if (isDayOff) {
-            return 'Alasan absen pada hari libur (wajib diisi)…';
+        if (isDayOff && dinasLuar === null) {
+            return 'Tulis alasan masuk di hari libur...';
         }
 
         if (latePermission) {
-            return 'Alasan izin masuk siang (minimal 10 karakter)…';
+            return 'Tulis alasan izin masuk siang (min. 10 karakter)...';
         }
 
-        return 'Catatan tambahan (opsional)…';
+        return 'Tulis catatan tambahan (opsional)...';
     });
 
     const showForm = $derived(
@@ -526,8 +543,8 @@
             !(rejectedLog !== null && !canRetryRejected),
     );
 
-    const canClockIn = $derived(showForm && !isClockOutMode);
-    const canClockOut = $derived(showForm && isClockOutMode);
+    const canClockIn = $derived(showForm && !isClockOutMode && !inAppWarning);
+    const canClockOut = $derived(showForm && isClockOutMode && !inAppWarning);
 
     const nextAttemptNo = $derived(
         isClockOutMode
@@ -539,6 +556,7 @@
 
     const submitDisabled = $derived(
         submitting ||
+            inAppWarning ||
             gps?.status === 'PERMISSION_DENIED' ||
             gps?.status === 'GPS_UNAVAILABLE' ||
             isHardBlocked ||
@@ -559,14 +577,14 @@
 
         if (activeLog === null) {
             return {
-                label: 'Belum Absen',
+                label: 'Belum absen',
                 className: `${badgeBase} ${toneWarning}`,
             };
         }
 
         if (isMissedClockOut) {
             return {
-                label: 'Lupa Clock-Out',
+                label: 'Belum Clock-Out',
                 className: `${badgeBase} ${toneWarning}`,
             };
         }
@@ -592,11 +610,17 @@
               : 'Clock-In Sekarang',
     );
 
+    let lastModeClockOut: boolean | null = null;
+
     function openAttendance() {
         if (!canClockIn && !canClockOut) {
             return;
         }
 
+        if (lastModeClockOut !== null && lastModeClockOut !== isClockOutMode) {
+            pendingIdempotencyKey = null;
+        }
+        lastModeClockOut = isClockOutMode;
         feedback = null;
         sheetOpen = true;
     }
@@ -612,7 +636,7 @@
             feedback = {
                 type: 'error',
                 message:
-                    'Batas waktu absen ulang sudah berakhir. Hubungi HR Admin.',
+                    'Waktu absen ulang sudah habis. Hubungi HR.',
             };
             return;
         }
@@ -639,7 +663,7 @@
             if (capturedPhoto === null) {
                 feedback = {
                     type: 'error',
-                    message: 'Ambil foto selfie kamera langsung terlebih dahulu.',
+                    message: 'Ambil foto selfie dulu pakai kamera.',
                 };
                 return;
             }
@@ -660,18 +684,21 @@
             ) {
                 feedback = {
                     type: 'error',
-                    message: `Jarak Anda ${Math.round(freshDistance)} m dari kantor (maksimal ${freshHardBlockLimit} m). Mendekat ke lokasi dulu.`,
+                    message: `Jarak Anda ${Math.round(freshDistance)} m dari kantor (batas ${freshHardBlockLimit} m). Mendekat dulu.`,
                 };
                 return;
             }
 
-            const freshGeoNotes =
-                dinasLuar !== null
-                    ? freshAccuracy !== null && freshAccuracy > 100
-                    : freshDistance > office.radius_m ||
-                      (freshAccuracy !== null &&
-                          (freshAccuracy > office.radius_m ||
-                              freshAccuracy > 100));
+            const freshClockInInsideRadius =
+                !isClockOutMode && freshDistance <= office.radius_m;
+            const freshGeoNotes = freshClockInInsideRadius
+                ? false
+                : dinasLuar !== null
+                  ? freshAccuracy !== null && freshAccuracy > 100
+                  : freshDistance > office.radius_m ||
+                    (freshAccuracy !== null &&
+                        (freshAccuracy > office.radius_m ||
+                            freshAccuracy > 100));
 
             const now = Date.now() + clockOffsetMs;
             const freshEarlyLeave =
@@ -694,34 +721,29 @@
                 clockInMs >= effectiveEndMs;
 
             const trimmedNotes = notes.trim();
-            const freshRequiresNotes =
-                freshGeoNotes ||
-                isDayOff ||
-                freshEarlyLeave ||
-                freshRetryAfterEnd ||
-                freshClockOutRetry ||
-                latePermission;
+            const freshRequiresNotes = freshClockInInsideRadius
+                ? latePermission
+                : freshGeoNotes ||
+                  (isDayOff && dinasLuar === null) ||
+                  freshEarlyLeave ||
+                  freshRetryAfterEnd ||
+                  freshClockOutRetry ||
+                  latePermission;
 
-            if (freshRequiresNotes && trimmedNotes === '') {
+            if (freshRequiresNotes && trimmedNotes.length < 10) {
                 feedback = {
                     type: 'error',
-                    message:
-                        'Alasan wajib diisi untuk kondisi lokasi, lembur/hari libur, pulang awal, atau absen ulang.',
+                    message: 'Tulis alasan minimal 10 karakter.',
                 };
                 return;
             }
 
-            if (latePermission && trimmedNotes.length < 10) {
-                feedback = {
-                    type: 'error',
-                    message:
-                        'Alasan izin masuk siang wajib diisi minimal 10 karakter.',
-                };
-                return;
+            if (pendingIdempotencyKey === null) {
+                pendingIdempotencyKey = crypto.randomUUID();
             }
 
             const form = new FormData();
-            form.append('idempotency_key', crypto.randomUUID());
+            form.append('idempotency_key', pendingIdempotencyKey);
             form.append('lat', String(fresh.lat));
             form.append('lng', String(fresh.lng));
             form.append('accuracy_m', String(fresh.accuracyM ?? 0));
@@ -770,6 +792,7 @@
                 return;
             }
 
+            pendingIdempotencyKey = null;
             capturedPhoto = null;
             notes = '';
             latePermission = false;
@@ -914,7 +937,11 @@
             <div>
                 <dt class="text-stone-500">Toleransi</dt>
                 <dd class="mt-0.5 font-medium text-stone-900">
-                    {shift !== null ? `${shift.grace_period_minutes} menit` : '—'}
+                    {shift !== null
+                        ? `${shift.grace_period_minutes} menit`
+                        : dinasLuar !== null
+                          ? '10 menit'
+                          : '-'}
                 </dd>
             </div>
             <div>
@@ -931,8 +958,8 @@
             >
                 <p class="font-semibold">
                     {dinasLuar.status === 'PENDING'
-                        ? 'Dinas Luar — menunggu persetujuan HR'
-                        : 'Dinas Luar disetujui'}
+                        ? 'Dinas luar (menunggu persetujuan)'
+                        : 'Dinas luar disetujui'}
                 </p>
                 <p>
                     {dinasLuar.destination_location} · acuan masuk
@@ -940,7 +967,7 @@
                     {timezoneLabel(office.timezone)}
                 </p>
                 <p>
-                    Blokir radius dibuka; absen otomatis masuk antrean review HR.
+                    Batas radius kantor dibuka. Absen Anda akan dicek HR.
                 </p>
             </div>
         {/if}
@@ -949,8 +976,8 @@
             <div
                 class="mt-2 rounded-md border border-stone-300 bg-stone-100 p-2 text-[11px] leading-snug text-stone-700"
             >
-                Hari ini terjadwal OFF/libur. Absen tetap dibuka sebagai lembur
-                dan akan berstatus menunggu review HR.
+                Hari ini jadwal libur Anda. Anda tetap bisa absen lembur dan
+                akan dicek HR.
             </div>
         {/if}
 
@@ -1041,7 +1068,7 @@
                                     {/if}
                                 </p>
                                 <p class="text-xs font-medium text-stone-800">
-                                    Shift {log.shift ?? '—'}
+                                    Shift {log.shift ?? '-'}
                                 </p>
                             </div>
                             <div class="flex flex-wrap justify-end gap-1">
@@ -1058,7 +1085,7 @@
                         <p
                             class="mt-0.5 font-mono text-[11px] tabular-nums text-stone-600"
                         >
-                            Masuk {log.clock_in_at ?? '—'} · Pulang {log.clock_out_at ?? '—'}
+                            Masuk {log.clock_in_at ?? '-'} · Pulang {log.clock_out_at ?? '-'}
                         </p>
                         {#if recentFlags(log).length > 0}
                             <div class="mt-1 flex flex-wrap gap-1">
@@ -1089,7 +1116,7 @@
                 Clock-In Ditolak HR
             </p>
             <p class="mt-1 text-[13px] leading-snug text-red-800">
-                Alasan: {rejectedLog.clock_in_reject_reason ?? '—'}
+                Alasan: {rejectedLog.clock_in_reject_reason ?? '-'}
             </p>
             {#if rejectedLog.clock_out_reject_reason !== null}
                 <p class="mt-1 text-[12px] leading-snug text-red-800">
@@ -1099,11 +1126,10 @@
             <p class="mt-1.5 text-[11px] leading-snug text-red-700">
                 Percobaan #{rejectedLog.attempt_no}.
                 {#if canRetryRejected}
-                    Absen ulang dapat dilakukan sampai pukul
-                    {formatTime(closeDeadlineIso)}.
+                    Anda bisa absen ulang sampai pukul
+                    {formatTime(effectiveRetryDeadlineIso)}.
                 {:else}
-                    Batas waktu absen ulang sudah berakhir. Hubungi HR Admin
-                    untuk koreksi.
+                    Waktu absen ulang sudah habis. Hubungi HR untuk koreksi.
                 {/if}
             </p>
         </section>
@@ -1115,8 +1141,8 @@
         >
             <p class="font-semibold text-stone-900">Absen dikunci</p>
             <p class="mt-1 leading-snug">
-                Anda tidak dapat absen karena sedang dalam status Cuti/Izin/Sakit
-                yang telah disetujui hari ini.
+                Anda sedang Cuti, Izin, atau Sakit hari ini, jadi absen tidak
+                diperlukan.
             </p>
         </section>
     {:else if isMissedClockOut}
@@ -1139,12 +1165,12 @@
                     : 'text-yellow-800'}"
             >
                 Anda belum Clock-Out sampai batas
-                {formatTime(closeDeadlineIso)}. Jam pulang akan ditetapkan HR
-                melalui verifikasi absensi.
+                {formatTime(closeDeadlineIso)}. HR akan menetapkan jam pulang
+                Anda.
             </p>
             {#if isClockOutRejected}
                 <p class="mt-1 text-[12px] font-medium leading-snug text-red-800">
-                    Clock-Out ditolak: {activeLog?.clock_out_reject_reason ?? '—'}
+                    Clock-Out ditolak: {activeLog?.clock_out_reject_reason ?? '-'}
                 </p>
             {/if}
         </section>
@@ -1160,8 +1186,8 @@
                     Clock-Out ditolak HR
                 </p>
                 <p class="mt-1">
-                    Alasan: {activeLog?.clock_out_reject_reason ?? '—'}.
-                    Ajukan koreksi status ke HR Admin.
+                    Alasan: {activeLog?.clock_out_reject_reason ?? '-'}.
+                    Hubungi HR untuk koreksi.
                 </p>
             {:else}
                 <p class="flex items-center gap-1.5 font-semibold">
@@ -1183,16 +1209,15 @@
                 Clock-In ditolak HR
             </p>
             <p class="mt-1">
-                Alasan: {activeLog?.clock_in_reject_reason ?? '—'}. Hubungi HR
-                Admin untuk koreksi status.
+                Alasan: {activeLog?.clock_in_reject_reason ?? '-'}. Hubungi HR
+                untuk koreksi.
             </p>
         </section>
     {:else if rejectedLog !== null && !canRetryRejected}
         <p
             class="rounded-lg border border-stone-300 bg-stone-100 p-3 text-[13px] leading-snug text-stone-700"
         >
-            Batas waktu absen ulang sudah berakhir. Hubungi HR Admin untuk
-            koreksi status.
+            Waktu absen ulang sudah habis. Hubungi HR untuk koreksi.
         </p>
     {/if}
 
@@ -1239,6 +1264,12 @@
                     </Button>
                 </div>
 
+                <p
+                    class="mt-1.5 font-mono text-[11px] tabular-nums text-stone-600"
+                >
+                    Jarak {distanceM !== null ? `${Math.round(distanceM)} m` : '-'} · Akurasi {accuracyM !== null ? `${Math.round(accuracyM)} m` : '-'} · Batas {office.radius_m} m
+                </p>
+
                 <div class="mt-2 grid grid-cols-3 gap-1.5 text-center">
                     <div class="rounded border border-stone-200 bg-white p-1.5">
                         <p class="text-[10px] text-stone-500">Jarak</p>
@@ -1247,7 +1278,7 @@
                         >
                             {distanceM !== null
                                 ? `${Math.round(distanceM)} m`
-                                : '—'}
+                                : '-'}
                         </p>
                     </div>
                     <div class="rounded border border-stone-200 bg-white p-1.5">
@@ -1257,7 +1288,7 @@
                         >
                             {accuracyM !== null
                                 ? `${Math.round(accuracyM)} m`
-                                : '—'}
+                                : '-'}
                         </p>
                     </div>
                     <div class="rounded border border-stone-200 bg-white p-1.5">
@@ -1303,6 +1334,7 @@
                         disabled={submitting}
                         onCapture={(payload) => {
                             capturedPhoto = payload;
+                            pendingIdempotencyKey = null;
                             feedback = null;
                         }}
                     />
@@ -1319,9 +1351,9 @@
                         class="mt-0.5 size-4"
                     />
                     <span>
-                        <span class="font-semibold">Izin Masuk Siang</span> —
-                        terlambat {lateMinutesNow} menit. Wajib isi alasan
-                        minimal 10 karakter agar dapat ditinjau HR.
+                        <span class="font-semibold">Izin Masuk Siang</span>
+                        (terlambat {lateMinutesNow} menit). Tulis alasan minimal
+                        10 karakter agar dicek HR.
                     </span>
                 </label>
             {/if}
@@ -1335,8 +1367,12 @@
                         Catatan
                     </label>
                     {#if requiresNotes}
-                        <span class="text-[11px] font-medium text-red-600">
-                            Wajib diisi
+                        <span
+                            class="font-mono text-[11px] font-medium tabular-nums {notes.trim().length >= 10
+                                ? 'text-green-700'
+                                : 'text-red-600'}"
+                        >
+                            Wajib ({notes.trim().length}/10 karakter)
                         </span>
                     {:else}
                         <span class="text-[11px] text-stone-500">Opsional</span>

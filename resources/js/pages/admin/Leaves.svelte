@@ -95,6 +95,29 @@
         return value.slice(0, 10);
     }
 
+    const statusLabels: Record<string, string> = {
+        PENDING: 'Menunggu',
+        APPROVED: 'Disetujui',
+        PARTIALLY_CANCELLED: 'Sebagian dibatalkan',
+        REJECTED: 'Ditolak',
+        CANCELLED: 'Dibatalkan',
+    };
+
+    const typeLabels: Record<string, string> = {
+        CUTI: 'Cuti Tahunan',
+        IZIN: 'Izin',
+        SAKIT: 'Sakit',
+        DINAS_LUAR: 'Dinas Luar',
+    };
+
+    function statusLabel(status: string): string {
+        return statusLabels[status] ?? status;
+    }
+
+    function typeLabel(type: string): string {
+        return typeLabels[type] ?? type;
+    }
+
     function statusBadgeClass(status: string): string {
         if (status === 'APPROVED') {
             return `${badgeBase} border-green-300 bg-green-50 text-green-700`;
@@ -299,7 +322,7 @@
                 <div
                     class="rounded-lg border border-stone-200 border-t-2 border-t-[#8B5E3C] bg-white p-3 shadow-xs"
                 >
-                    <p class="text-xs text-stone-600">Menunggu Approval</p>
+                    <p class="text-xs text-stone-600">Menunggu Persetujuan</p>
                     <p
                         class="mt-1 font-mono text-xl font-semibold text-yellow-800 tabular-nums"
                     >
@@ -319,7 +342,7 @@
                 <div
                     class="rounded-lg border border-stone-200 border-t-2 border-t-[#8B5E3C] bg-white p-3 shadow-xs"
                 >
-                    <p class="text-xs text-stone-600">Batal Parsial</p>
+                    <p class="text-xs text-stone-600">Sebagian Dibatalkan</p>
                     <p
                         class="mt-1 font-mono text-xl font-semibold text-blue-700 tabular-nums"
                     >
@@ -341,10 +364,10 @@
                     class="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-800"
                 >
                     <option value="">Semua Status</option>
-                    <option value="PENDING">PENDING</option>
-                    <option value="APPROVED">APPROVED</option>
+                    <option value="PENDING">Menunggu</option>
+                    <option value="APPROVED">Disetujui</option>
                     <option value="PARTIALLY_CANCELLED">
-                        PARTIALLY_CANCELLED
+                        Sebagian dibatalkan
                     </option>
                 </select>
                 <select
@@ -352,10 +375,10 @@
                     class="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-800"
                 >
                     <option value="">Semua Jenis</option>
-                    <option value="CUTI">CUTI</option>
-                    <option value="IZIN">IZIN</option>
-                    <option value="SAKIT">SAKIT</option>
-                    <option value="DINAS_LUAR">DINAS_LUAR</option>
+                    <option value="CUTI">Cuti Tahunan</option>
+                    <option value="IZIN">Izin</option>
+                    <option value="SAKIT">Sakit</option>
+                    <option value="DINAS_LUAR">Dinas Luar</option>
                 </select>
             </div>
 
@@ -411,7 +434,7 @@
                                     </td>
                                     <td class="px-2.5 py-2">
                                         <span class={typeBadgeClass(req.type)}>
-                                            {req.type}
+                                            {typeLabel(req.type)}
                                         </span>
                                         {#if req.type === 'DINAS_LUAR' && req.destination_location}
                                             <p
@@ -461,7 +484,7 @@
                                         <span
                                             class={statusBadgeClass(req.status)}
                                         >
-                                            {req.status}
+                                            {statusLabel(req.status)}
                                         </span>
                                         {#if req.reviewer}
                                             <p
@@ -491,7 +514,7 @@
                                                     onclick={() =>
                                                         approve(req.id)}
                                                 >
-                                                    Approve
+                                                    Setujui
                                                 </Button>
                                                 <Button
                                                     size="sm"
@@ -503,7 +526,7 @@
                                                         feedback = null;
                                                     }}
                                                 >
-                                                    Reject
+                                                    Tolak
                                                 </Button>
                                             </div>
                                         {:else if (req.status === 'APPROVED' || req.status === 'PARTIALLY_CANCELLED') && req.days && req.days.some((d) => d.status === 'APPROVED')}
@@ -515,7 +538,7 @@
                                                 onclick={() =>
                                                     openCancelModal(req)}
                                             >
-                                                Batal Parsial
+                                                Batalkan Tanggal
                                             </Button>
                                         {/if}
                                     </td>
@@ -538,7 +561,7 @@
             class="w-full max-w-md rounded-lg border border-stone-200 bg-white p-4 shadow-lg"
         >
             <h3 class="text-sm font-semibold text-stone-900">
-                Konfirmasi Override Batas Cuti
+                Konfirmasi Persetujuan Lewat Batas Cuti
             </h3>
             <p class="mt-2 text-xs text-stone-700">{overrideTarget.message}</p>
             <div class="mt-4 flex justify-end gap-2">
@@ -640,7 +663,7 @@
                 class="flex items-center justify-between border-b border-stone-200 pb-2"
             >
                 <h3 class="text-sm font-semibold text-stone-900">
-                    Batal Parsial: {cancelTarget.user.name}
+                    Batalkan Sebagian Tanggal: {cancelTarget.user.name}
                 </h3>
                 <button
                     type="button"
@@ -655,7 +678,7 @@
             </div>
             <div class="mt-3 max-h-48 space-y-1.5 overflow-y-auto">
                 <p class="text-xs font-medium text-stone-700">
-                    Pilih tanggal APPROVED yang dibatalkan:
+                    Pilih tanggal yang ingin dibatalkan:
                 </p>
                 {#each (cancelTarget.days ?? []).filter((d) => d.status === 'APPROVED') as day (day.id)}
                     <label

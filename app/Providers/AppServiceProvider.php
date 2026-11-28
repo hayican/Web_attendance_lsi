@@ -7,6 +7,7 @@ use App\Models\SalesVisit;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
@@ -27,6 +28,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        if ($proxies = config('app.trusted_proxies')) {
+            TrustProxies::at($proxies);
+        }
+
         $this->configureDefaults();
 
         // PRD v8 stores ganti-hari sources polymorphically; keep DB values stable and model-rename safe.

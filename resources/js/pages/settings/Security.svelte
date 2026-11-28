@@ -4,7 +4,7 @@
     export const layout = {
         breadcrumbs: [
             {
-                title: 'Security settings',
+                title: 'Keamanan Akun',
                 href: edit(),
             },
         ],
@@ -23,7 +23,13 @@
     import { Button } from '@/components/ui/button';
     import { Label } from '@/components/ui/label';
 
-    let { passwordRules }: { passwordRules: string } = $props();
+    let {
+        passwordRules,
+        mustChangePassword = false,
+    }: {
+        passwordRules: string;
+        mustChangePassword?: boolean;
+    } = $props();
 </script>
 
 <AppHead title="Keamanan Akun" />
@@ -34,8 +40,17 @@
     <Heading
         variant="small"
         title="Ubah Password"
-        description="Gunakan password yang kuat dan unik agar akun tetap aman."
+        description="Pilih password yang kuat agar akun Anda aman."
     />
+
+    {#if mustChangePassword}
+        <div
+            role="alert"
+            class="rounded-lg border border-yellow-300 bg-yellow-50 p-3 text-xs text-yellow-800"
+        >
+            Ganti password Anda dulu sebelum masuk ke menu utama.
+        </div>
+    {/if}
 
     <Form
         {...SecurityController.update.form()}
@@ -88,7 +103,7 @@
                     type="submit"
                     disabled={processing}
                     data-test="update-password-button"
-                    class="min-h-11"
+                    class="min-h-12 md:min-h-9"
                 >
                     Simpan Password
                 </Button>

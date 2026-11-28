@@ -53,10 +53,8 @@
 
     type HistoryProps = {
         office: {
-            name: string;
             timezone: string;
         };
-        serverTimeIso: string;
         mode: 'office' | 'sales';
         range: 'month' | '30d';
         month: string;
@@ -83,23 +81,23 @@
     const toneNeutral = 'border-stone-300 bg-stone-100 text-stone-700';
 
     const flagLabels: Record<string, string> = {
-        OUT_OF_RADIUS: 'Luar Radius',
-        OUT_OF_RADIUS_VISIT_OUT: 'Luar Radius',
-        UNCERTAIN_ACCURACY: 'Akurasi Tidak Pasti',
-        LOW_ACCURACY: 'Akurasi Rendah',
-        SHARED_DEVICE: 'Perangkat Bersama',
-        EARLY_LEAVE: 'Pulang Awal',
-        LATE_PERMISSION: 'Izin Masuk Siang',
-        MISSED_CLOCK_OUT: 'Lupa Clock-Out',
-        MISSED_VISIT_OUT: 'Lupa Visit Out',
-        OFFSITE_DUTY: 'Dinas Luar',
-        OFF_DAY_ATTENDANCE: 'Absen Hari Libur',
-        IMPOSSIBLE_TRAVEL: 'Perjalanan Tidak Wajar',
-        REPEATED_COORDS: 'Koordinat Berulang',
-        CONSTANT_ACCURACY: 'Akurasi Konstan',
-        STALE_TIMESTAMP: 'Token Kedaluwarsa',
-        SHORT_DURATION: 'Durasi Singkat',
-        UNVERIFIED_OUTLET: 'Toko Belum Terverifikasi',
+        OUT_OF_RADIUS: 'Di luar radius',
+        OUT_OF_RADIUS_VISIT_OUT: 'Di luar radius',
+        UNCERTAIN_ACCURACY: 'Akurasi GPS meragukan',
+        LOW_ACCURACY: 'Sinyal GPS lemah',
+        SHARED_DEVICE: 'Perangkat dipakai bersama',
+        EARLY_LEAVE: 'Pulang lebih awal',
+        LATE_PERMISSION: 'Izin masuk siang',
+        MISSED_CLOCK_OUT: 'Belum Clock-Out',
+        MISSED_VISIT_OUT: 'Belum Visit Out',
+        OFFSITE_DUTY: 'Dinas luar',
+        OFF_DAY_ATTENDANCE: 'Hadir di hari libur',
+        IMPOSSIBLE_TRAVEL: 'Perpindahan lokasi terlalu cepat',
+        REPEATED_COORDS: 'Titik GPS berulang',
+        CONSTANT_ACCURACY: 'Akurasi GPS selalu sama',
+        STALE_TIMESTAMP: 'Data GPS kedaluwarsa',
+        SHORT_DURATION: 'Kunjungan terlalu singkat',
+        UNVERIFIED_OUTLET: 'Toko baru belum diverifikasi',
     };
 
     function verificationMeta(status: string | null): {
@@ -108,15 +106,15 @@
     } {
         switch (status) {
             case 'AUTO_APPROVED':
-                return { label: 'Sah Otomatis', className: `${badgeBase} ${toneSuccess}` };
+                return { label: 'Otomatis disetujui', className: `${badgeBase} ${toneSuccess}` };
             case 'APPROVED':
                 return { label: 'Disetujui', className: `${badgeBase} ${toneSuccess}` };
             case 'PENDING_REVIEW':
-                return { label: 'Menunggu Review', className: `${badgeBase} ${toneWarning}` };
+                return { label: 'Menunggu cek HR', className: `${badgeBase} ${toneWarning}` };
             case 'REJECTED':
                 return { label: 'Ditolak', className: `${badgeBase} ${toneError}` };
             default:
-                return { label: '—', className: `${badgeBase} ${toneNeutral}` };
+                return { label: '-', className: `${badgeBase} ${toneNeutral}` };
         }
     }
 
@@ -126,13 +124,13 @@
     } {
         switch (status) {
             case 'IN_PROGRESS':
-                return { label: 'Berjalan', className: `${badgeBase} ${toneInfo}` };
+                return { label: 'Sedang berkunjung', className: `${badgeBase} ${toneInfo}` };
             case 'COMPLETED':
                 return { label: 'Selesai', className: `${badgeBase} ${toneSuccess}` };
             case 'CANCELLED':
                 return { label: 'Dibatalkan', className: `${badgeBase} ${toneNeutral}` };
             case 'AUTO_CLOSED':
-                return { label: 'Ditutup Otomatis', className: `${badgeBase} ${toneWarning}` };
+                return { label: 'Ditutup otomatis', className: `${badgeBase} ${toneWarning}` };
             default:
                 return { label: status, className: `${badgeBase} ${toneNeutral}` };
         }
@@ -248,8 +246,10 @@
                 class="h-full w-full object-cover"
             />
         </a>
-    {:else if notice}
-        <p class="text-[10px] leading-snug text-stone-500">{notice}</p>
+    {:else}
+        <p class="text-[10px] leading-snug text-stone-500">
+            {notice ?? 'Foto sudah dihapus (lewat 12 bulan)'}
+        </p>
     {/if}
 {/snippet}
 
@@ -265,7 +265,7 @@
             Riwayat {mode === 'sales' ? 'Kunjungan Sales' : 'Absensi'}
         </h1>
         <p class="mt-0.5 text-[11px] text-stone-500">
-            Hanya menampilkan data milik akun Anda.
+            Menampilkan riwayat milik akun Anda.
         </p>
     </div>
 
@@ -375,7 +375,7 @@
                             <span
                                 class="font-mono text-sm font-semibold tabular-nums text-stone-900"
                             >
-                                {item.clock_in_at ?? '—'}
+                                {item.clock_in_at ?? '-'}
                             </span>
                             <span class={clockInMeta.className}>
                                 {clockInMeta.label}
@@ -390,7 +390,7 @@
                             <span
                                 class="font-mono text-sm font-semibold tabular-nums text-stone-900"
                             >
-                                {item.clock_out_at ?? '—'}
+                                {item.clock_out_at ?? '-'}
                             </span>
                             {#if item.clock_out_status}
                                 <span class={clockOutMeta.className}>
@@ -451,9 +451,9 @@
                     </div>
                 {/if}
 
-                {#if item.clock_in_photo_url || item.clock_out_photo_url || item.clock_in_photo_notice || item.clock_out_photo_notice}
+                {#if item.clock_in_at || item.clock_out_at || item.clock_in_photo_url || item.clock_out_photo_url || item.clock_in_photo_notice || item.clock_out_photo_notice}
                     <div class="mt-2 flex items-end gap-2">
-                        {#if item.clock_in_photo_url || item.clock_in_photo_notice}
+                        {#if item.clock_in_at || item.clock_in_photo_url || item.clock_in_photo_notice}
                             <div class="space-y-1">
                                 <p class="text-[10px] text-stone-500">
                                     Foto masuk
@@ -465,7 +465,7 @@
                                 )}
                             </div>
                         {/if}
-                        {#if item.clock_out_photo_url || item.clock_out_photo_notice}
+                        {#if item.clock_out_at || item.clock_out_photo_url || item.clock_out_photo_notice}
                             <div class="space-y-1">
                                 <p class="text-[10px] text-stone-500">
                                     Foto pulang
@@ -499,7 +499,7 @@
                             {item.outlet_name}
                         </p>
                         <p class="text-[11px] text-stone-500">
-                            {item.outlet_code ?? 'NOO'} · {item.outlet_address}
+                            {item.outlet_code ?? 'Toko baru'} · {item.outlet_address}
                         </p>
                     </div>
                     <div class="flex shrink-0 flex-col items-end gap-1">
@@ -515,22 +515,22 @@
                 <div class="mt-2 grid grid-cols-3 gap-2 text-[11px]">
                     <div class="rounded-md border border-stone-200 bg-stone-50 p-2">
                         <p class="text-[10px] text-stone-500">Visit In</p>
-                        <p class="mt-0.5 font-mono text-sm font-semibold">
-                            {item.visit_in_at ?? '—'}
+                        <p class="mt-0.5 font-mono text-sm font-semibold tabular-nums">
+                            {item.visit_in_at ?? '-'}
                         </p>
                     </div>
                     <div class="rounded-md border border-stone-200 bg-stone-50 p-2">
                         <p class="text-[10px] text-stone-500">Visit Out</p>
-                        <p class="mt-0.5 font-mono text-sm font-semibold">
-                            {item.visit_out_at ?? '—'}
+                        <p class="mt-0.5 font-mono text-sm font-semibold tabular-nums">
+                            {item.visit_out_at ?? '-'}
                         </p>
                     </div>
                     <div class="rounded-md border border-stone-200 bg-stone-50 p-2">
                         <p class="text-[10px] text-stone-500">Durasi</p>
-                        <p class="mt-0.5 font-mono text-sm font-semibold">
+                        <p class="mt-0.5 font-mono text-sm font-semibold tabular-nums">
                             {item.duration_minutes !== null
-                                ? `${item.duration_minutes} m`
-                                : '—'}
+                                ? `${item.duration_minutes} menit`
+                                : '-'}
                         </p>
                     </div>
                 </div>

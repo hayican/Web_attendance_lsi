@@ -26,6 +26,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -77,8 +78,15 @@ class SalesVisitController extends Controller
 
         $recentOutlets = Location::query()
             ->whereIn('id', $recentOutletIds)
-            ->where('status', '!=', LocationStatus::INACTIVE)
+            ->where(function ($query) use ($user): void {
+                $query->where('status', LocationStatus::ACTIVE)
+                    ->orWhere(function ($sub) use ($user): void {
+                        $sub->where('status', LocationStatus::PENDING_VERIFICATION)
+                            ->where('created_by', $user->id);
+                    });
+            })
             ->get()
+            ->sortBy(fn (Location $loc): int => (int) $recentOutletIds->search($loc->id))
             ->map(fn (Location $loc): array => $this->serializeOutlet($loc, null))
             ->values();
 
@@ -140,6 +148,7 @@ class SalesVisitController extends Controller
             'homeTimezone' => $homeOffice->timezone,
             'todayDate' => $todayBranch,
             'serverTimeIso' => $nowUtc->toIso8601String(),
+            'isDayOff' => ! $this->balanceService->isEffectiveWorkDay($user, $todayBranch),
             'hasApprovedTimeOff' => $this->scheduleResolver->hasApprovedTimeOff($user->id, $todayBranch),
             'rejectedOutlets' => $rejectedOutlets,
             'activeVisit' => $activeVisit !== null ? [
@@ -147,7 +156,7 @@ class SalesVisitController extends Controller
                 'outlet_name' => $activeVisit->outletLocation->name,
                 'outlet_code' => $activeVisit->outletLocation->code,
                 'outlet_address' => $activeVisit->outletLocation->address,
-                'outlet_radius_m' => $activeVisit->outletLocation->radius_m,
+                'outlet_radius_m' => $activeVisit->outlet_radius_m ?? $activeVisit->outletLocation->radius_m,
                 'outlet_timezone' => $activeVisit->outletLocation->timezone,
                 'visit_in_at' => $activeVisit->visit_in_at?->toIso8601String(),
                 'visit_in_time' => $activeVisit->visit_in_at?->setTimezone($activeVisit->outletLocation->timezone)->format('H:i'),
@@ -375,39 +384,16 @@ class SalesVisitController extends Controller
         $isUnverifiedOutlet = $outlet->status === LocationStatus::PENDING_VERIFICATION;
         $notes = trim((string) ($validated['notes'] ?? ''));
 
-        if (($geoEval['requires_notes'] || $isUnverifiedOutlet) && mb_strlen($notes) < 10) {
+        if (($geoEval['requires_notes'] || $isUnverifiedOutlet || ! $isEffectiveWorkDay) && mb_strlen($notes) < 10) {
             throw ValidationException::withMessages([
-                'notes' => ['Alasan Visit In wajib diisi minimal 10 karakter untuk toko NOO, luar radius, atau akurasi GPS rendah.'],
+                'notes' => ['Alasan Visit In wajib diisi minimal 10 karakter untuk toko NOO, luar radius, akurasi GPS rendah, atau hari libur/OFF.'],
             ]);
         }
 
-        $gpsTokenResult = $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
-        $camTokenResult = $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
+        $gpsTokenResult = $this->tokenGuard->validateGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+        $this->tokenGuard->validateCameraToken((string) $validated['camera_token'], $user->id);
 
         $deviceId = $this->helper->resolveDeviceId($request);
-        $fraud = $this->antiFraud->evaluate(
-            userId: $user->id,
-            localDate: $visitDate,
-            lat: $lat,
-            lng: $lng,
-            accuracyM: $accuracyM,
-            nowUtc: $nowUtc,
-            deviceId: $deviceId,
-            isInsideRadius: $distanceM <= $outlet->radius_m,
-            isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
-            currentOutletId: $outlet->id,
-        );
-
-        $flags = [...$geoEval['flags'], ...$fraud['flags']];
-        if (! $isEffectiveWorkDay) {
-            $flags[] = 'OFF_DAY_ATTENDANCE';
-        }
-        if ($isUnverifiedOutlet) {
-            $flags[] = 'UNVERIFIED_OUTLET';
-        }
-        $flags = array_values(array_unique($flags));
-        $needsReview = $flags !== [];
-
         /** @var UploadedFile $photo */
         $photo = $request->file('photo');
         $photoPath = $this->imageEvidence->storeWatermarkedPhoto(
@@ -439,8 +425,11 @@ class SalesVisitController extends Controller
                 $request,
                 $notes,
                 $idempotencyKey,
-                $needsReview,
-                $flags,
+                $geoEval,
+                $gpsTokenResult,
+                $isEffectiveWorkDay,
+                $isUnverifiedOutlet,
+                $validated,
             ): SalesVisit {
                 User::query()->where('id', $user->id)->lockForUpdate()->first();
 
@@ -459,7 +448,30 @@ class SalesVisitController extends Controller
 
                 $this->helper->cancelPendingLeaveDayOnPresence($user->id, $visitDate);
 
-                return SalesVisit::query()->create([
+                $fraud = $this->antiFraud->evaluate(
+                    userId: $user->id,
+                    localDate: $visitDate,
+                    lat: $lat,
+                    lng: $lng,
+                    accuracyM: $accuracyM,
+                    nowUtc: $nowUtc,
+                    deviceId: $deviceId,
+                    isInsideRadius: $distanceM <= $outlet->radius_m,
+                    isStaleTimestamp: $gpsTokenResult['stale'],
+                    currentOutletId: $outlet->id,
+                );
+
+                $flags = [...$geoEval['flags'], ...$fraud['flags']];
+                if (! $isEffectiveWorkDay) {
+                    $flags[] = 'OFF_DAY_ATTENDANCE';
+                }
+                if ($isUnverifiedOutlet) {
+                    $flags[] = 'UNVERIFIED_OUTLET';
+                }
+                $flags = array_values(array_unique($flags));
+                $needsReview = $flags !== [];
+
+                $created = SalesVisit::query()->create([
                     'user_id' => $user->id,
                     'outlet_location_id' => $outlet->id,
                     'outlet_lat' => $outlet->latitude,
@@ -482,6 +494,11 @@ class SalesVisitController extends Controller
                     'verification_status' => $needsReview ? VerificationStatus::PENDING_REVIEW : VerificationStatus::AUTO_APPROVED,
                     'anomaly_flags' => $flags !== [] ? $flags : null,
                 ]);
+
+                $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+                $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
+
+                return $created;
             });
         } catch (QueryException $e) {
             if ((string) $e->getCode() === '23000') {
@@ -568,7 +585,7 @@ class SalesVisitController extends Controller
 
         $validated = $request->validate([
             'idempotency_key' => ['required', 'uuid'],
-            'activity_category_id' => ['required', 'integer', 'exists:activity_categories,id'],
+            'activity_category_id' => ['required', 'integer', Rule::exists('activity_categories', 'id')->where('is_active', true)],
             'visit_notes' => ['required', 'string', 'min:3', 'max:1000'],
             'lat' => ['required', 'numeric', 'between:-90,90'],
             'lng' => ['required', 'numeric', 'between:-180,180'],
@@ -596,6 +613,21 @@ class SalesVisitController extends Controller
             ]);
         }
 
+        $user->load('officeLocation');
+        /** @var Location $homeOffice */
+        $homeOffice = $user->officeLocation;
+        $nowUtc = CarbonImmutable::now('UTC');
+        $todayBranch = $nowUtc->setTimezone($homeOffice->timezone)->toDateString();
+        $visitDate = $visit->visit_date->toDateString();
+
+        if ($visitDate < $todayBranch) {
+            $this->autoCloseStaleVisits($user->id, $todayBranch);
+
+            throw ValidationException::withMessages([
+                'visit' => ['Kunjungan dari hari sebelumnya sudah ditutup otomatis (MISSED_VISIT_OUT) dan tidak dapat di-Visit Out.'],
+            ]);
+        }
+
         /** @var Location $outlet */
         $outlet = $visit->outletLocation;
         // Snapshot from Visit In wins: HR may later edit outlet coords/radius, history must stay truthful.
@@ -605,8 +637,6 @@ class SalesVisitController extends Controller
         /** @var ActivityCategory $category */
         $category = ActivityCategory::query()->findOrFail((int) $validated['activity_category_id']);
 
-        $nowUtc = CarbonImmutable::now('UTC');
-        $visitDate = $visit->visit_date->toDateString();
         $lat = (float) $validated['lat'];
         $lng = (float) $validated['lng'];
         $accuracyM = (float) $validated['accuracy_m'];
@@ -631,63 +661,86 @@ class SalesVisitController extends Controller
             ]);
         }
 
-        $gpsTokenResult = $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+        $gpsTokenResult = $this->tokenGuard->validateGpsSessionToken((string) $validated['gps_session_token'], $user->id);
 
         $deviceId = $this->helper->resolveDeviceId($request);
-        $fraud = $this->antiFraud->evaluate(
-            userId: $user->id,
-            localDate: $visitDate,
-            lat: $lat,
-            lng: $lng,
-            accuracyM: $accuracyM,
-            nowUtc: $nowUtc,
-            deviceId: $deviceId,
-            isInsideRadius: $distanceM <= $outletRadiusM,
-            isStaleTimestamp: $gpsTokenResult['stale'],
-            currentOutletId: $outlet->id,
-        );
-
         $durationMinutes = $visit->visit_in_at !== null
             ? (int) $visit->visit_in_at->diffInMinutes($nowUtc)
             : 0;
 
-        $existingFlags = $visit->anomaly_flags ?? [];
-        $outFlags = [...$existingFlags, ...$geoEval['flags'], ...$fraud['flags']];
+        DB::transaction(function () use (
+            $visit,
+            $visitDate,
+            $outlet,
+            $outletRadiusM,
+            $geoEval,
+            $gpsTokenResult,
+            $nowUtc,
+            $durationMinutes,
+            $category,
+            $validated,
+            $lat,
+            $lng,
+            $accuracyM,
+            $distanceM,
+            $deviceId,
+            $request,
+            $idempotencyKey,
+            $user,
+        ): void {
+            $fraud = $this->antiFraud->evaluate(
+                userId: $user->id,
+                localDate: $visitDate,
+                lat: $lat,
+                lng: $lng,
+                accuracyM: $accuracyM,
+                nowUtc: $nowUtc,
+                deviceId: $deviceId,
+                isInsideRadius: $distanceM <= $outletRadiusM,
+                isStaleTimestamp: $gpsTokenResult['stale'],
+                currentOutletId: $outlet->id,
+            );
 
-        if (! $this->balanceService->isEffectiveWorkDay($user, $visitDate)) {
-            $outFlags[] = 'OFF_DAY_ATTENDANCE';
-        }
+            $existingFlags = $visit->anomaly_flags ?? [];
+            $outFlags = [...$existingFlags, ...$geoEval['flags'], ...$fraud['flags']];
 
-        if ($durationMinutes < 3 && ! $category->exempt_short_duration) {
-            $outFlags[] = 'SHORT_DURATION';
-        }
+            if (! $this->balanceService->isEffectiveWorkDay($user, $visitDate)) {
+                $outFlags[] = 'OFF_DAY_ATTENDANCE';
+            }
 
-        if ($outlet->status !== LocationStatus::ACTIVE) {
-            $outFlags[] = 'UNVERIFIED_OUTLET';
-        }
+            if ($durationMinutes < 3 && ! $category->exempt_short_duration) {
+                $outFlags[] = 'SHORT_DURATION';
+            }
 
-        $outFlags = array_values(array_unique($outFlags));
-        $verificationStatus = $outFlags !== []
-            ? VerificationStatus::PENDING_REVIEW
-            : VerificationStatus::AUTO_APPROVED;
+            if ($outlet->status !== LocationStatus::ACTIVE) {
+                $outFlags[] = 'UNVERIFIED_OUTLET';
+            }
 
-        $visit->update([
-            'visit_out_at' => $nowUtc,
-            'duration_minutes' => $durationMinutes,
-            'activity_category_id' => $category->id,
-            'visit_notes' => trim((string) $validated['visit_notes']),
-            'visit_out_lat' => $lat,
-            'visit_out_lng' => $lng,
-            'visit_out_accuracy_m' => $accuracyM,
-            'visit_out_distance_m' => $distanceM,
-            'visit_out_device_id' => $deviceId !== '' ? $deviceId : null,
-            'visit_out_ip' => $request->ip(),
-            'visit_out_user_agent' => $request->userAgent(),
-            'visit_out_idempotency_key' => $idempotencyKey,
-            'visit_status' => VisitStatus::COMPLETED,
-            'verification_status' => $verificationStatus,
-            'anomaly_flags' => $outFlags !== [] ? $outFlags : null,
-        ]);
+            $outFlags = array_values(array_unique($outFlags));
+            $verificationStatus = $outFlags !== []
+                ? VerificationStatus::PENDING_REVIEW
+                : VerificationStatus::AUTO_APPROVED;
+
+            $visit->update([
+                'visit_out_at' => $nowUtc,
+                'duration_minutes' => $durationMinutes,
+                'activity_category_id' => $category->id,
+                'visit_notes' => trim((string) $validated['visit_notes']),
+                'visit_out_lat' => $lat,
+                'visit_out_lng' => $lng,
+                'visit_out_accuracy_m' => $accuracyM,
+                'visit_out_distance_m' => $distanceM,
+                'visit_out_device_id' => $deviceId !== '' ? $deviceId : null,
+                'visit_out_ip' => $request->ip(),
+                'visit_out_user_agent' => $request->userAgent(),
+                'visit_out_idempotency_key' => $idempotencyKey,
+                'visit_status' => VisitStatus::COMPLETED,
+                'verification_status' => $verificationStatus,
+                'anomaly_flags' => $outFlags !== [] ? $outFlags : null,
+            ]);
+
+            $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+        });
 
         return response()->json(['visit' => $visit->fresh()]);
     }

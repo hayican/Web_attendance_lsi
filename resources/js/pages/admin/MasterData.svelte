@@ -11,13 +11,13 @@
 
 <script lang="ts">
     import { page, router } from '@inertiajs/svelte';
+    import { SvelteMap } from 'svelte/reactivity';
     import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
     import CalendarDays from '@lucide/svelte/icons/calendar-days';
     import KeyRound from '@lucide/svelte/icons/key-round';
     import MapPin from '@lucide/svelte/icons/map-pin';
     import Pencil from '@lucide/svelte/icons/pencil';
     import Plus from '@lucide/svelte/icons/plus';
-    import RefreshCw from '@lucide/svelte/icons/refresh-cw';
     import ShieldCheck from '@lucide/svelte/icons/shield-check';
     import Unlock from '@lucide/svelte/icons/unlock';
     import Upload from '@lucide/svelte/icons/upload';
@@ -112,6 +112,22 @@
         is_active: boolean;
     };
 
+    type EligibleGantiHariOrigin = {
+        user_id: number;
+        source_date: string;
+        source_type: 'ATTENDANCE_LOG' | 'SALES_VISIT';
+        source_id: number;
+        deadline_date: string;
+    };
+
+    type UpcomingGantiHariItem = {
+        id: number;
+        user_id: number;
+        work_date: string;
+        compensation_source_date: string;
+        notes: string | null;
+    };
+
     type MasterDataProps = {
         currentYear: number;
         activeHrCount: number;
@@ -121,6 +137,8 @@
         patterns: PatternItem[];
         holidays: HolidayItem[];
         categories: CategoryItem[];
+        eligibleGantiHariOrigins?: EligibleGantiHariOrigin[];
+        upcomingGantiHari?: UpcomingGantiHariItem[];
     };
 
     let {
@@ -132,6 +150,8 @@
         patterns,
         holidays,
         categories,
+        eligibleGantiHariOrigins = [],
+        upcomingGantiHari = [],
     }: MasterDataProps = $props();
 
     const currentUserId = $derived(page.props.auth.user?.id ?? 0);
@@ -142,7 +162,6 @@
     type TabKey =
         | 'users'
         | 'shifts'
-        | 'patterns'
         | 'offices'
         | 'outlets'
         | 'categories'
@@ -156,6 +175,7 @@
     // Filters
     let userSearch = $state('');
     let userRoleFilter = $state('');
+    let userOrgFilter = $state('');
     let outletStatusFilter = $state('');
     let outletSearch = $state('');
     let holidayYearFilter = $state('');
@@ -169,10 +189,17 @@
     const activeOffices = $derived(offices.filter((o) => o.status === 'ACTIVE'));
     const activeShifts = $derived(shifts.filter((s) => s.is_active));
     const activePatterns = $derived(patterns.filter((p) => p.is_active));
+    const userOrganizations = $derived(
+        users
+            .map((u) => u.organization?.trim() ?? '')
+            .filter((org, idx, arr) => org !== '' && arr.indexOf(org) === idx)
+            .sort(),
+    );
 
     const filteredUsers = $derived(
         users.filter((u) => {
             if (userRoleFilter && u.role !== userRoleFilter) return false;
+            if (userOrgFilter && (u.organization?.trim() ?? '') !== userOrgFilter) return false;
             if (userSearch.trim()) {
                 const q = userSearch.trim().toLowerCase();
                 if (
@@ -236,6 +263,18 @@
         if (status === 'PENDING_VERIFICATION')
             return `${badgeBase} border-yellow-300 bg-yellow-50 text-yellow-800`;
         return `${badgeBase} border-red-300 bg-red-50 text-red-700`;
+    }
+
+    function roleLabel(role: UserItem['role']): string {
+        if (role === 'EMPLOYEE_OFFICE') return 'Staf Kantor';
+        if (role === 'EMPLOYEE_SALES') return 'Tim Sales';
+        return 'HR Admin';
+    }
+
+    function locStatusLabel(status: LocationItem['status']): string {
+        if (status === 'ACTIVE') return 'Aktif';
+        if (status === 'PENDING_VERIFICATION') return 'Menunggu verifikasi';
+        return 'Nonaktif';
     }
 
     function holidayTypeBadge(type: HolidayItem['holiday_type']): string {
@@ -492,10 +531,20 @@
     let ovShiftId = $state<number | ''>('');
     let ovReplacementDate = $state('');
     let ovNotes = $state('');
+    const overrideEligibleOrigins = $derived(
+        overrideTarget
+            ? eligibleGantiHariOrigins.filter((o) => o.user_id === overrideTarget?.id)
+            : [],
+    );
+    const overrideUpcomingGantiHari = $derived(
+        overrideTarget
+            ? upcomingGantiHari.filter((g) => g.user_id === overrideTarget?.id)
+            : [],
+    );
 
     let csvBalanceOpen = $state(false);
     let csvBalanceYear = $state(0);
-    let csvBalanceText = $state('nik,adjustment_days\nOFF001,2\nSLS001,-1.5');
+    let csvBalanceText = $state('nik,year,adjustment_days,notes\nOFF001,2026,2,Saldo awal\nSLS001,2026,-1.5,Koreksi');
     const balancePreview = $derived.by(() => {
         const b = balanceTarget?.leave_balances?.[0];
         if (!b) return null;
@@ -524,12 +573,21 @@
                 return firstCell !== 'nik';
             })
             .map((line) => {
-                const [nikRaw = '', adjRaw = ''] = line.split(/[,;]/).map((s) => s.trim());
+                const parts = line.split(/[,;]/).map((s) => s.trim());
+                const nikRaw = parts[0] ?? '';
+                const hasYearCol = parts.length >= 3;
+                const yearRaw = hasYearCol ? (parts[1] ?? '') : String(csvBalanceYear);
+                const adjRaw = hasYearCol ? (parts[2] ?? '') : (parts[1] ?? '');
+                const notesRaw = hasYearCol ? parts.slice(3).join(',').trim() : '';
+
                 const nikUpper = nikRaw.toUpperCase();
                 const formulaUnsafe =
                     /^[=+\-@\t\r]/.test(nikRaw) ||
                     /^[=+@\t\r]/.test(adjRaw) ||
-                    (adjRaw.startsWith('-') && Number.isNaN(Number(adjRaw)));
+                    (adjRaw.startsWith('-') && Number.isNaN(Number(adjRaw))) ||
+                    /^[=+\-@\t\r]/.test(notesRaw);
+                const yearNum = yearRaw === '' ? Number(csvBalanceYear) : Number(yearRaw);
+                const invalidYear = !Number.isInteger(yearNum) || yearNum < 2000 || yearNum > 2100;
                 const adjNum = Number(adjRaw);
                 const invalidAdj =
                     adjRaw === '' || Number.isNaN(adjNum) || adjNum < -30 || adjNum > 30;
@@ -537,22 +595,40 @@
                 const matchedUser = users.find((u) => u.nik.toUpperCase() === nikUpper);
                 const isSelf = nikUpper !== '' && nikUpper === currentUserNik;
                 const notFound = !formulaUnsafe && !matchedUser;
+                const joinDateStr = matchedUser?.join_date?.slice(0, 10) ?? '';
+                const oneYearDate = joinDateStr
+                    ? `${Number(joinDateStr.slice(0, 4)) + 1}${joinDateStr.slice(4)}`
+                    : '';
+                const todayStr = new Date().toISOString().slice(0, 10);
+                const refDate = yearNum === currentYear ? todayStr : `${yearNum}-12-31`;
+                const ineligibleTenure =
+                    !invalidAdj && adjNum > 0 && oneYearDate !== '' && oneYearDate > refDate;
 
                 return {
                     nik: nikRaw,
+                    year: Number.isInteger(yearNum) ? yearNum : Number(csvBalanceYear),
                     userName: matchedUser?.name ?? '-',
                     adjustment_days: Number.isNaN(adjNum) ? 0 : adjNum,
+                    notes: notesRaw,
                     unsafe: formulaUnsafe,
+                    invalidYear,
                     invalidAdj,
                     invalidStep,
+                    ineligibleTenure,
                     notFound,
                     isSelf,
                     duplicateNik: false,
-                    hasError: formulaUnsafe || invalidAdj || invalidStep || notFound,
+                    hasError:
+                        formulaUnsafe ||
+                        invalidYear ||
+                        invalidAdj ||
+                        invalidStep ||
+                        ineligibleTenure ||
+                        notFound,
                 };
             });
 
-        const nikCounts = new Map<string, number>();
+        const nikCounts = new SvelteMap<string, number>();
         for (const row of rows) {
             const key = row.nik.trim().toUpperCase();
             if (key !== '') nikCounts.set(key, (nikCounts.get(key) ?? 0) + 1);
@@ -770,8 +846,8 @@
                     status === 'INACTIVE' ? nooRejectReason.trim() : null,
             },
             status === 'ACTIVE'
-                ? `Toko NOO ${nooTarget.name} disetujui menjadi ACTIVE.`
-                : `Toko NOO ${nooTarget.name} ditolak.`,
+                ? `Toko baru ${nooTarget.name} disetujui dan aktif.`
+                : `Toko baru ${nooTarget.name} ditolak.`,
         );
         if (ok) nooTarget = null;
     }
@@ -910,7 +986,7 @@
                 Master Data HR &amp; Operasional
             </h1>
             <p class="text-xs text-stone-200">
-                Kelola karyawan, shift &amp; pola 90 hari, kantor cabang, outlet NOO, kategori aktivitas, dan hari libur
+                Kelola karyawan, pola jadwal &amp; jam shift, kantor cabang, outlet NOO, kategori aktivitas, dan hari libur
             </p>
         </div>
         <div class="rounded-lg border border-white/20 bg-white/10 px-3 py-1.5 text-xs">
@@ -924,7 +1000,7 @@
         >
             <AlertTriangle class="size-4 shrink-0" />
             <span>
-                Perhatian: Baru terdapat {activeHrCount} HR Admin aktif. Minimal wajib 2 HR Admin aktif agar proses saling verifikasi (peer review) berjalan.
+                Perhatian: Baru terdapat {activeHrCount} HR Admin aktif. Minimal wajib 2 HR Admin aktif agar proses saling verifikasi berjalan.
             </span>
         </div>
     {/if}
@@ -944,8 +1020,7 @@
     <div class="flex flex-wrap gap-1.5 rounded-lg border border-stone-200 bg-white p-1.5 shadow-xs">
         {#each [
             { key: 'users', label: `Karyawan (${users.length})` },
-            { key: 'shifts', label: `Master Shift (${shifts.length})` },
-            { key: 'patterns', label: `Pola Jadwal (${patterns.length})` },
+            { key: 'shifts', label: `Pola & Jam Shift (${patterns.length}/${shifts.length})` },
             { key: 'offices', label: `Kantor (${offices.length})` },
             {
                 key: 'outlets',
@@ -984,10 +1059,19 @@
                         bind:value={userRoleFilter}
                         class="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-800"
                     >
-                        <option value="">Semua Role</option>
-                        <option value="HR_ADMIN">HR_ADMIN</option>
-                        <option value="EMPLOYEE_OFFICE">EMPLOYEE_OFFICE</option>
-                        <option value="EMPLOYEE_SALES">EMPLOYEE_SALES</option>
+                        <option value="">Semua Peran</option>
+                        <option value="HR_ADMIN">HR Admin</option>
+                        <option value="EMPLOYEE_OFFICE">Staf Kantor</option>
+                        <option value="EMPLOYEE_SALES">Tim Sales</option>
+                    </select>
+                    <select
+                        bind:value={userOrgFilter}
+                        class="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-800"
+                    >
+                        <option value="">Semua Organisasi</option>
+                        {#each userOrganizations as org (org)}
+                            <option value={org}>{org}</option>
+                        {/each}
                     </select>
                 </div>
                 <div class="flex flex-wrap gap-2">
@@ -1018,6 +1102,7 @@
                         <tr>
                             <th class="px-2.5">NIK / Nama</th>
                             <th class="px-2.5">Role</th>
+                            <th class="px-2.5">Organisasi</th>
                             <th class="px-2.5">Kantor</th>
                             <th class="px-2.5">Pola Shift</th>
                             <th class="px-2.5">Tgl Masuk</th>
@@ -1052,7 +1137,8 @@
                                         </div>
                                     </div>
                                 </td>
-                                <td class="px-2.5 py-2 font-mono text-xs">{u.role}</td>
+                                <td class="px-2.5 py-2 text-xs">{roleLabel(u.role)}</td>
+                                <td class="px-2.5 py-2 text-xs">{u.organization ?? '-'}</td>
                                 <td class="px-2.5 py-2 text-xs">{u.office_location?.name ?? '-'}</td>
                                 <td class="px-2.5 py-2 text-xs">{u.default_shift_pattern?.name ?? 'Fleksibel'}</td>
                                 <td class="px-2.5 py-2 font-mono text-xs">{u.join_date.slice(0, 10)}</td>
@@ -1139,184 +1225,168 @@
         </section>
     {/if}
 
-    <!-- TAB 2: MASTER SHIFT -->
+    <!-- TAB 2: POLA JADWAL & MASTER JAM SHIFT -->
     {#if activeTab === 'shifts'}
-        <section class="rounded-lg border border-stone-200 bg-white shadow-xs">
-            <div class="flex items-center justify-between border-b border-stone-200 p-3">
-                <h2 class="text-sm font-semibold">Master Jam Shift</h2>
-                <Button
-                    size="sm"
-                    class="h-8 cursor-pointer bg-[#6F3E1D] text-xs text-white hover:bg-[#583015]"
-                    onclick={() => openShiftModal(null)}
-                >
-                    <Plus class="mr-1 size-3.5" /> Tambah Shift
-                </Button>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-[13px]">
-                    <thead class="h-8 bg-stone-100 text-[11px] tracking-wide text-stone-600 uppercase">
-                        <tr>
-                            <th class="px-2.5">Kode</th>
-                            <th class="px-2.5">Nama Shift</th>
-                            <th class="px-2.5">Jam Kerja</th>
-                            <th class="px-2.5">Toleransi</th>
-                            <th class="px-2.5">Auto-Close</th>
-                            <th class="px-2.5">Status</th>
-                            <th class="px-2.5">Aksi</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-stone-200">
-                        {#each shifts as s (s.id)}
-                            <tr class="hover:bg-stone-50">
-                                <td class="px-2.5 py-2 font-mono font-semibold">{s.code}</td>
-                                <td class="px-2.5 py-2">{s.name}</td>
-                                <td class="px-2.5 py-2 font-mono text-xs">
-                                    {s.start_time.slice(0, 5)} – {s.end_time.slice(0, 5)}
-                                </td>
-                                <td class="px-2.5 py-2 font-mono text-xs">{s.grace_period_minutes} mnt</td>
-                                <td class="px-2.5 py-2 font-mono text-xs">{s.auto_close_hours} jam</td>
-                                <td class="px-2.5 py-2">
-                                    <span class={activeBadge(s.is_active)}>
-                                        {s.is_active ? 'AKTIF' : 'NONAKTIF'}
-                                    </span>
-                                </td>
-                                <td class="px-2.5 py-2">
-                                    <div class="flex gap-1.5">
-                                        <Button
-                                            size="sm"
-                                            variant="outline"
-                                            class="h-7 cursor-pointer border-stone-300 px-2 text-[11px]"
-                                            onclick={() => openShiftModal(s)}
-                                        >
-                                            Edit
-                                        </Button>
-                                        {#if s.is_active}
-                                            <Button
-                                                size="sm"
-                                                variant="outline"
-                                                disabled={busy}
-                                                class="h-7 cursor-pointer border-red-300 px-2 text-[11px] text-red-700 hover:bg-red-50"
-                                                onclick={() =>
-                                                    sendJson(
-                                                        `/admin/shifts/${s.id}/deactivate`,
-                                                        'POST',
-                                                        {},
-                                                        `Shift ${s.code} dinonaktifkan.`,
-                                                    )}
-                                            >
-                                                Nonaktifkan
-                                            </Button>
-                                        {/if}
-                                    </div>
-                                </td>
-                            </tr>
-                        {/each}
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    {/if}
-
-    <!-- TAB 3: POLA JADWAL -->
-    {#if activeTab === 'patterns'}
-        <section class="rounded-lg border border-stone-200 bg-white shadow-xs">
-            <div class="flex items-center justify-between border-b border-stone-200 p-3">
-                <div>
-                    <h2 class="text-sm font-semibold">Pola Jadwal Mingguan &amp; Auto-Generate 90 Hari</h2>
-                    <p class="text-[11px] text-stone-500">
-                        Menyimpan atau mengubah pola otomatis memperbarui jadwal 90 hari ke depan (tetap menjaga MANUAL_OVERRIDE).
-                    </p>
+        <div class="space-y-4">
+            <section class="rounded-lg border border-stone-200 bg-white shadow-xs">
+                <div class="flex items-center justify-between border-b border-stone-200 p-3">
+                    <div>
+                        <h2 class="text-sm font-semibold">Pola Jadwal Mingguan</h2>
+                        <p class="text-[11px] text-stone-500">
+                            Mengubah pola jadwal otomatis memperbarui jadwal kerja karyawan. Jadwal khusus per tanggal tidak ikut tertimpa.
+                        </p>
+                    </div>
+                    <Button
+                        size="sm"
+                        class="h-8 cursor-pointer bg-[#6F3E1D] text-xs text-white hover:bg-[#583015]"
+                        onclick={() => openPatternModal(null)}
+                    >
+                        <Plus class="mr-1 size-3.5" /> Tambah Pola
+                    </Button>
                 </div>
-                <Button
-                    size="sm"
-                    class="h-8 cursor-pointer bg-[#6F3E1D] text-xs text-white hover:bg-[#583015]"
-                    onclick={() => openPatternModal(null)}
-                >
-                    <Plus class="mr-1 size-3.5" /> Tambah Pola
-                </Button>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-[13px]">
-                    <thead class="h-8 bg-stone-100 text-[11px] tracking-wide text-stone-600 uppercase">
-                        <tr>
-                            <th class="px-2.5">Nama Pola</th>
-                            <th class="px-2.5">Sen</th>
-                            <th class="px-2.5">Sel</th>
-                            <th class="px-2.5">Rab</th>
-                            <th class="px-2.5">Kam</th>
-                            <th class="px-2.5">Jum</th>
-                            <th class="px-2.5">Sab</th>
-                            <th class="px-2.5">Min</th>
-                            <th class="px-2.5">Status</th>
-                            <th class="px-2.5">Aksi</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-stone-200">
-                        {#each patterns as p (p.id)}
-                            <tr class="hover:bg-stone-50">
-                                <td class="px-2.5 py-2 font-medium">{p.name}</td>
-                                {#each [p.mon_shift_id, p.tue_shift_id, p.wed_shift_id, p.thu_shift_id, p.fri_shift_id, p.sat_shift_id, p.sun_shift_id] as sid, i (i)}
-                                    <td class="px-2 py-2 font-mono text-[11px]">
-                                        <span class={sid ? 'text-stone-800' : 'text-stone-400'}>
-                                            {shiftLabel(sid)}
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-[13px]">
+                        <thead class="h-8 bg-stone-100 text-[11px] tracking-wide text-stone-600 uppercase">
+                            <tr>
+                                <th class="px-2.5">Nama Pola</th>
+                                <th class="px-2.5">Sen</th>
+                                <th class="px-2.5">Sel</th>
+                                <th class="px-2.5">Rab</th>
+                                <th class="px-2.5">Kam</th>
+                                <th class="px-2.5">Jum</th>
+                                <th class="px-2.5">Sab</th>
+                                <th class="px-2.5">Min</th>
+                                <th class="px-2.5">Status</th>
+                                <th class="px-2.5">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-stone-200">
+                            {#each patterns as p (p.id)}
+                                <tr class="hover:bg-stone-50">
+                                    <td class="px-2.5 py-2 font-medium">{p.name}</td>
+                                    {#each [p.mon_shift_id, p.tue_shift_id, p.wed_shift_id, p.thu_shift_id, p.fri_shift_id, p.sat_shift_id, p.sun_shift_id] as sid, i (i)}
+                                        <td class="px-2 py-2 font-mono text-[11px]">
+                                            <span class={sid ? 'text-stone-800' : 'text-stone-400'}>
+                                                {shiftLabel(sid)}
+                                            </span>
+                                        </td>
+                                    {/each}
+                                    <td class="px-2.5 py-2">
+                                        <span class={activeBadge(p.is_active)}>
+                                            {p.is_active ? 'AKTIF' : 'NONAKTIF'}
                                         </span>
                                     </td>
-                                {/each}
-                                <td class="px-2.5 py-2">
-                                    <span class={activeBadge(p.is_active)}>
-                                        {p.is_active ? 'AKTIF' : 'NONAKTIF'}
-                                    </span>
-                                </td>
-                                <td class="px-2.5 py-2">
-                                    <div class="flex flex-wrap gap-1">
-                                        <Button
-                                            size="sm"
-                                            variant="outline"
-                                            class="h-7 cursor-pointer border-stone-300 px-2 text-[11px]"
-                                            onclick={() => openPatternModal(p)}
-                                        >
-                                            Edit
-                                        </Button>
-                                        {#if p.is_active}
+                                    <td class="px-2.5 py-2">
+                                        <div class="flex flex-wrap gap-1">
                                             <Button
                                                 size="sm"
                                                 variant="outline"
-                                                disabled={busy}
-                                                class="h-7 cursor-pointer border-[#8B5E3C] px-2 text-[11px] text-[#6F3E1D] hover:bg-[#F5EDE6]"
-                                                onclick={() =>
-                                                    sendJson(
-                                                        `/admin/shift-patterns/${p.id}/generate`,
-                                                        'POST',
-                                                        {},
-                                                        `Jadwal 90 hari untuk pola ${p.name} berhasil digenerate.`,
-                                                    )}
+                                                class="h-7 cursor-pointer border-stone-300 px-2 text-[11px]"
+                                                onclick={() => openPatternModal(p)}
                                             >
-                                                <RefreshCw class="mr-1 size-3" /> Generate 90 Hari
+                                                Edit
                                             </Button>
-                                            <Button
-                                                size="sm"
-                                                variant="outline"
-                                                disabled={busy}
-                                                class="h-7 cursor-pointer border-red-300 px-2 text-[11px] text-red-700 hover:bg-red-50"
-                                                onclick={() =>
-                                                    sendJson(
-                                                        `/admin/shift-patterns/${p.id}/deactivate`,
-                                                        'POST',
-                                                        {},
-                                                        `Pola ${p.name} dinonaktifkan.`,
-                                                    )}
-                                            >
-                                                Nonaktifkan
-                                            </Button>
-                                        {/if}
-                                    </div>
-                                </td>
+                                            {#if p.is_active}
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    disabled={busy}
+                                                    class="h-7 cursor-pointer border-red-300 px-2 text-[11px] text-red-700 hover:bg-red-50"
+                                                    onclick={() =>
+                                                        sendJson(
+                                                            `/admin/shift-patterns/${p.id}/deactivate`,
+                                                            'POST',
+                                                            {},
+                                                            `Pola ${p.name} dinonaktifkan.`,
+                                                        )}
+                                                >
+                                                    Nonaktifkan
+                                                </Button>
+                                            {/if}
+                                        </div>
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="rounded-lg border border-stone-200 bg-white shadow-xs">
+                <div class="flex items-center justify-between border-b border-stone-200 p-3">
+                    <h2 class="text-sm font-semibold">Master Jam Shift</h2>
+                    <Button
+                        size="sm"
+                        class="h-8 cursor-pointer bg-[#6F3E1D] text-xs text-white hover:bg-[#583015]"
+                        onclick={() => openShiftModal(null)}
+                    >
+                        <Plus class="mr-1 size-3.5" /> Tambah Shift
+                    </Button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-[13px]">
+                        <thead class="h-8 bg-stone-100 text-[11px] tracking-wide text-stone-600 uppercase">
+                            <tr>
+                                <th class="px-2.5">Kode</th>
+                                <th class="px-2.5">Nama Shift</th>
+                                <th class="px-2.5">Jam Kerja</th>
+                                <th class="px-2.5">Toleransi</th>
+                                <th class="px-2.5">Tutup Otomatis</th>
+                                <th class="px-2.5">Status</th>
+                                <th class="px-2.5">Aksi</th>
                             </tr>
-                        {/each}
-                    </tbody>
-                </table>
-            </div>
-        </section>
+                        </thead>
+                        <tbody class="divide-y divide-stone-200">
+                            {#each shifts as s (s.id)}
+                                <tr class="hover:bg-stone-50">
+                                    <td class="px-2.5 py-2 font-mono font-semibold">{s.code}</td>
+                                    <td class="px-2.5 py-2">{s.name}</td>
+                                    <td class="px-2.5 py-2 font-mono text-xs">
+                                        {s.start_time.slice(0, 5)} – {s.end_time.slice(0, 5)}
+                                    </td>
+                                    <td class="px-2.5 py-2 font-mono text-xs">{s.grace_period_minutes} mnt</td>
+                                    <td class="px-2.5 py-2 font-mono text-xs">{s.auto_close_hours} jam</td>
+                                    <td class="px-2.5 py-2">
+                                        <span class={activeBadge(s.is_active)}>
+                                            {s.is_active ? 'AKTIF' : 'NONAKTIF'}
+                                        </span>
+                                    </td>
+                                    <td class="px-2.5 py-2">
+                                        <div class="flex gap-1.5">
+                                            <Button
+                                                size="sm"
+                                                variant="outline"
+                                                class="h-7 cursor-pointer border-stone-300 px-2 text-[11px]"
+                                                onclick={() => openShiftModal(s)}
+                                            >
+                                                Edit
+                                            </Button>
+                                            {#if s.is_active}
+                                                <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    disabled={busy}
+                                                    class="h-7 cursor-pointer border-red-300 px-2 text-[11px] text-red-700 hover:bg-red-50"
+                                                    onclick={() =>
+                                                        sendJson(
+                                                            `/admin/shifts/${s.id}/deactivate`,
+                                                            'POST',
+                                                            {},
+                                                            `Shift ${s.code} dinonaktifkan.`,
+                                                        )}
+                                                >
+                                                    Nonaktifkan
+                                                </Button>
+                                            {/if}
+                                        </div>
+                                    </td>
+                                </tr>
+                            {/each}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
     {/if}
 
     <!-- TAB 4: KANTOR -->
@@ -1359,7 +1429,7 @@
                                 <td class="px-2.5 py-2 font-mono text-xs">{loc.timezone}</td>
                                 <td class="px-2.5 py-2 font-mono text-xs">{loc.work_days?.join(',')}</td>
                                 <td class="px-2.5 py-2">
-                                    <span class={locStatusBadge(loc.status)}>{loc.status}</span>
+                                    <span class={locStatusBadge(loc.status)}>{locStatusLabel(loc.status)}</span>
                                 </td>
                                 <td class="px-2.5 py-2">
                                     <div class="flex gap-1.5">
@@ -1413,9 +1483,9 @@
                         class="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs text-stone-800"
                     >
                         <option value="">Semua Status</option>
-                        <option value="PENDING_VERIFICATION">PENDING_VERIFICATION (NOO)</option>
-                        <option value="ACTIVE">ACTIVE</option>
-                        <option value="INACTIVE">INACTIVE</option>
+                        <option value="PENDING_VERIFICATION">Menunggu verifikasi (Toko baru)</option>
+                        <option value="ACTIVE">Aktif</option>
+                        <option value="INACTIVE">Nonaktif</option>
                     </select>
                 </div>
                 <div class="flex flex-wrap gap-2">
@@ -1476,7 +1546,7 @@
                                     </td>
                                     <td class="px-2.5 py-2 font-mono text-xs">{loc.timezone}</td>
                                     <td class="px-2.5 py-2">
-                                        <span class={locStatusBadge(loc.status)}>{loc.status}</span>
+                                        <span class={locStatusBadge(loc.status)}>{locStatusLabel(loc.status)}</span>
                                     </td>
                                     <td class="px-2.5 py-2">
                                         <div class="flex flex-wrap gap-1">
@@ -1724,15 +1794,15 @@
                     </label>
                 {/if}
                 <label class="block">
-                    <span class="mb-1 block font-medium">Role</span>
+                    <span class="mb-1 block font-medium">Peran</span>
                     <select
                         bind:value={uRole}
                         disabled={isSelfEdit}
                         class="h-8 w-full rounded-md border border-stone-300 bg-white px-2 text-xs disabled:bg-stone-100"
                     >
-                        <option value="EMPLOYEE_OFFICE">EMPLOYEE_OFFICE</option>
-                        <option value="EMPLOYEE_SALES">EMPLOYEE_SALES</option>
-                        <option value="HR_ADMIN">HR_ADMIN</option>
+                        <option value="EMPLOYEE_OFFICE">Staf Kantor</option>
+                        <option value="EMPLOYEE_SALES">Tim Sales</option>
+                        <option value="HR_ADMIN">HR Admin</option>
                     </select>
                 </label>
                 <label class="block">
@@ -1919,8 +1989,8 @@
 <!-- MODAL: OVERRIDE JADWAL HARIAN -->
 {#if overrideTarget}
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
-        <div class="w-full max-w-sm rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
-            <h3 class="text-sm font-semibold">Override Jadwal: {overrideTarget.nik}</h3>
+        <div class="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
+            <h3 class="text-sm font-semibold">Atur Jadwal Khusus: {overrideTarget.nik}</h3>
             <div class="mt-3 space-y-2 text-xs">
                 <label class="block">
                     <span class="mb-1 block font-medium">Tanggal (&gt;= Hari Ini)</span>
@@ -1936,9 +2006,31 @@
                             <span class="mb-1 block font-medium">Tanggal Asal Ganti Hari (opsional)</span>
                             <Input bind:value={ovReplacementDate} type="date" class="h-8 text-xs" />
                             <span class="mt-1 block text-[11px] text-stone-500">
-                                Pilih tanggal libur dengan absen/kunjungan OFF_DAY_ATTENDANCE yang sah.
+                                Pilih tanggal libur dengan kehadiran di hari libur yang sudah disetujui.
                             </span>
                         </label>
+                        {#if overrideEligibleOrigins.length > 0}
+                            <div class="rounded border border-stone-200 bg-stone-50 p-2">
+                                <p class="mb-1 text-[11px] font-medium text-stone-700">
+                                    Kehadiran hari libur yang memenuhi syarat:
+                                </p>
+                                <div class="flex flex-wrap gap-1.5">
+                                    {#each overrideEligibleOrigins as origin (`${origin.source_type}-${origin.source_id}`)}
+                                        <button
+                                            type="button"
+                                            class={`cursor-pointer rounded border px-2 py-1 font-mono text-[11px] tabular-nums transition ${
+                                                ovReplacementDate === origin.source_date
+                                                    ? 'border-[#6F3E1D] bg-[#6F3E1D] text-white'
+                                                    : 'border-stone-300 bg-white text-stone-800 hover:border-[#6F3E1D]'
+                                            }`}
+                                            onclick={() => (ovReplacementDate = origin.source_date)}
+                                        >
+                                            {origin.source_date} (≤ {origin.deadline_date})
+                                        </button>
+                                    {/each}
+                                </div>
+                            </div>
+                        {/if}
                     {/if}
                     <label class="block">
                         <span class="mb-1 block font-medium">Catatan / Alasan</span>
@@ -1956,6 +2048,45 @@
                     </label>
                 {/if}
             </div>
+            {#if overrideUpcomingGantiHari.length > 0}
+                <div class="mt-3 rounded border border-stone-200 bg-stone-50 p-2.5 text-xs">
+                    <p class="mb-1.5 font-medium text-stone-700">Ganti Hari Mendatang</p>
+                    <div class="space-y-1.5">
+                        {#each overrideUpcomingGantiHari as item (item.id)}
+                            <div class="flex items-center justify-between gap-2 rounded border border-stone-200 bg-white px-2 py-1.5">
+                                <div class="min-w-0">
+                                    <p class="font-mono text-[11px] font-medium text-stone-900 tabular-nums">
+                                        {item.work_date}
+                                        <span class="font-normal text-stone-500">
+                                            ← {item.compensation_source_date}
+                                        </span>
+                                    </p>
+                                    {#if item.notes}
+                                        <p class="truncate text-[11px] text-stone-500">{item.notes}</p>
+                                    {/if}
+                                </div>
+                                <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={busy}
+                                    class="h-6 shrink-0 cursor-pointer border-red-300 px-2 text-[11px] text-red-700 hover:bg-red-50"
+                                    onclick={async () => {
+                                        if (!overrideTarget) return;
+                                        await sendJson(
+                                            `/admin/users/${overrideTarget.id}/schedule-override/cancel`,
+                                            'POST',
+                                            { work_date: item.work_date },
+                                            `Ganti hari ${overrideTarget.nik} pada ${item.work_date} dibatalkan.`,
+                                        );
+                                    }}
+                                >
+                                    Batalkan
+                                </Button>
+                            </div>
+                        {/each}
+                    </div>
+                </div>
+            {/if}
             <div class="mt-4 flex justify-end gap-2">
                 <Button size="sm" variant="outline" onclick={() => (overrideTarget = null)}>Batal</Button>
                 <Button
@@ -1992,7 +2123,7 @@
         <div class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
             <h3 class="text-sm font-semibold">Impor CSV Saldo Awal Cuti</h3>
             <p class="mt-1 text-xs text-stone-600">
-                Format: `nik,adjustment_days` (kelipatan 0.5). Transaksi atomik all-or-nothing; NIK duplikat ditolak; `used_days` &amp; `pending_days` tetap utuh.
+                Format: `nik,year,adjustment_days,notes` (kelipatan 0.5; 2 kolom `nik,adjustment_days` juga didukung). Jika ada satu baris salah, impor batal semua. NIK duplikat ditolak. Cuti terpakai dan cuti menunggu tetap aman.
             </p>
             <div class="mt-3 space-y-2 text-xs">
                 <div class="flex items-center gap-2">
@@ -2003,7 +2134,7 @@
                     <input type="file" accept=".csv,text/csv" onchange={(e) => readCsvFile(e, (t) => (csvBalanceText = t))} />
                     <a
                         class="ml-auto font-medium text-[#6F3E1D] underline"
-                        href="data:text/csv;charset=utf-8,nik%2Cadjustment_days%0AOFF001%2C2%0ASLS001%2C-1.5"
+                        href="data:text/csv;charset=utf-8,nik%2Cyear%2Cadjustment_days%2Cnotes%0AOFF001%2C2026%2C2%2CSaldo%20awal%0ASLS001%2C2026%2C-1.5%2CKoreksi"
                         download="template-saldo-cuti.csv"
                     >
                         Unduh Template
@@ -2016,7 +2147,9 @@
                             <tr>
                                 <th class="px-2 py-1">NIK</th>
                                 <th class="px-2 py-1">Nama</th>
+                                <th class="px-2 py-1">Tahun</th>
                                 <th class="px-2 py-1">Adjustment</th>
+                                <th class="px-2 py-1">Catatan</th>
                                 <th class="px-2 py-1">Validasi</th>
                             </tr>
                         </thead>
@@ -2025,14 +2158,20 @@
                                 <tr>
                                     <td class="px-2 py-1 font-mono">{row.nik}</td>
                                     <td class="px-2 py-1">{row.userName}</td>
-                                    <td class="px-2 py-1 font-mono">{row.adjustment_days}</td>
+                                    <td class="px-2 py-1 font-mono tabular-nums">{row.year}</td>
+                                    <td class="px-2 py-1 font-mono tabular-nums">{row.adjustment_days}</td>
+                                    <td class="px-2 py-1 text-stone-600">{row.notes || '-'}</td>
                                     <td class="px-2 py-1">
                                         {#if row.unsafe}
                                             <span class="text-red-700">Formula berbahaya!</span>
+                                        {:else if row.invalidYear}
+                                            <span class="text-red-700">Tahun tidak valid</span>
                                         {:else if row.invalidAdj}
                                             <span class="text-red-700">Angka di luar -30..30</span>
                                         {:else if row.invalidStep}
                                             <span class="text-red-700">Harus kelipatan 0.5</span>
+                                        {:else if row.ineligibleTenure}
+                                            <span class="text-red-700">Masa kerja &lt; 1 thn (saldo + ditolak)</span>
                                         {:else if row.duplicateNik}
                                             <span class="text-red-700">NIK duplikat</span>
                                         {:else if row.notFound}
@@ -2063,7 +2202,9 @@
                                 year: Number(csvBalanceYear),
                                 rows: csvBalanceRows.map((r) => ({
                                     nik: r.nik,
+                                    year: r.year,
                                     adjustment_days: r.adjustment_days,
+                                    notes: r.notes || null,
                                 })),
                             },
                             'Saldo cuti CSV berhasil diimpor.',
@@ -2105,7 +2246,7 @@
                     <Input bind:value={sGrace} type="number" class="h-8 text-xs" />
                 </label>
                 <label class="block">
-                    <span class="mb-1 block font-medium">Batas Auto-Close (Jam)</span>
+                    <span class="mb-1 block font-medium">Batas Tutup Otomatis (Jam)</span>
                     <Input bind:value={sAutoClose} type="number" class="h-8 text-xs" />
                 </label>
             </div>
@@ -2262,10 +2403,10 @@
             <div class="mt-4 flex justify-end gap-2">
                 <Button size="sm" variant="outline" onclick={() => (nooTarget = null)}>Batal</Button>
                 <Button size="sm" disabled={busy} class="bg-red-700 text-white hover:bg-red-800" onclick={() => submitNoo('INACTIVE')}>
-                    Tolak NOO
+                    Tolak Toko Baru
                 </Button>
                 <Button size="sm" disabled={busy} class="bg-green-700 text-white hover:bg-green-800" onclick={() => submitNoo('ACTIVE')}>
-                    Setujui ACTIVE
+                    Setujui &amp; Aktifkan
                 </Button>
             </div>
         </div>
@@ -2278,7 +2419,7 @@
         <div class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 shadow-lg">
             <h3 class="text-sm font-semibold">Impor CSV Daftar Outlet</h3>
             <p class="mt-1 text-xs text-stone-600">
-                Format: `code,name,address,latitude,longitude,radius_m,timezone` per baris (atomik all-or-nothing).
+                Format: `code,name,address,latitude,longitude,radius_m,timezone` per baris. Jika ada satu baris salah, impor batal semua.
             </p>
             <div class="mt-3 space-y-2 text-xs">
                 <input type="file" accept=".csv,text/csv" onchange={(e) => readCsvFile(e, (t) => (csvOutletText = t))} />

@@ -1,7 +1,7 @@
 <script module lang="ts">
     export const layout = {
-        title: 'Log in to your account',
-        description: 'Enter your email and password below to log in',
+        title: 'Masuk ke Akun',
+        description: 'Masuk dengan NIK atau email dan password Anda',
     };
 </script>
 
@@ -10,25 +10,21 @@
     import AppHead from '@/components/AppHead.svelte';
     import InputError from '@/components/InputError.svelte';
     import PasswordInput from '@/components/PasswordInput.svelte';
-    import TextLink from '@/components/TextLink.svelte';
     import { Button } from '@/components/ui/button';
     import { Checkbox } from '@/components/ui/checkbox';
     import { Input } from '@/components/ui/input';
     import { Label } from '@/components/ui/label';
     import { Spinner } from '@/components/ui/spinner';
     import { store } from '@/routes/login';
-    import { request } from '@/routes/password';
 
     let {
         status = '',
-        canResetPassword,
     }: {
         status?: string;
-        canResetPassword: boolean;
     } = $props();
 </script>
 
-<AppHead title="Log in" />
+<AppHead title="Masuk" />
 
 {#if status}
     <div class="mb-4 text-center text-sm font-medium text-green-600">
@@ -58,14 +54,7 @@
             </div>
 
             <div class="grid gap-2">
-                <div class="flex items-center justify-between">
-                    <Label for="password">Password</Label>
-                    {#if canResetPassword}
-                        <TextLink href={request()} class="text-sm">
-                            Forgot your password?
-                        </TextLink>
-                    {/if}
-                </div>
+                <Label for="password">Password</Label>
                 <PasswordInput
                     id="password"
                     name="password"
@@ -74,23 +63,26 @@
                     placeholder="Password"
                 />
                 <InputError message={errors.password} />
+                <p class="text-xs text-stone-600">
+                    Lupa password? Hubungi HR untuk reset.
+                </p>
             </div>
 
             <div class="flex items-center justify-between">
                 <Label for="remember" class="flex items-center space-x-3">
                     <Checkbox id="remember" name="remember" />
-                    <span>Remember me</span>
+                    <span>Ingat saya</span>
                 </Label>
             </div>
 
             <Button
                 type="submit"
-                class="mt-4 w-full"
+                class="mt-4 min-h-12 w-full bg-[#6F3E1D] text-white hover:bg-[#583015]"
                 disabled={processing}
                 data-test="login-button"
             >
                 {#if processing}<Spinner />{/if}
-                Log in
+                Masuk
             </Button>
         </div>
     {/snippet}

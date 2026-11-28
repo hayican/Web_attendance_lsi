@@ -72,7 +72,8 @@ class OfficeAttendanceController extends Controller
 
         $schedule = $this->scheduleResolver->resolveOrCreateSchedule($user, $workDate);
         $shift = $schedule?->shift;
-        $isDayOff = ! $this->balanceService->isEffectiveWorkDay($user, $workDate) || $shift === null;
+        $isEffectiveWorkDay = $this->balanceService->isEffectiveWorkDay($user, $workDate);
+        $isDayOff = ! $isEffectiveWorkDay || $shift === null;
         $hasApprovedTimeOff = $this->scheduleResolver->hasApprovedTimeOff($user->id, $workDate);
         $dinasLuar = $this->scheduleResolver->dinasLuarForDate($user->id, $workDate);
 
@@ -95,13 +96,19 @@ class OfficeAttendanceController extends Controller
         $effectiveStart = $this->scheduleResolver->effectiveStartTime($workDate, $timezone, $shift, $dinasLuar);
         $effectiveEnd = $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
         $autoCloseHours = $shift !== null ? $shift->auto_close_hours : 5;
-        $closeDeadline = $effectiveEnd !== null
-            ? $effectiveEnd->addHours($autoCloseHours)
-            : CarbonImmutable::parse("{$workDate} 23:59:59", $timezone);
+        $endOfDay = CarbonImmutable::parse("{$workDate} 23:59:59", $timezone);
+        $closeDeadline = (! $isEffectiveWorkDay && $dinasLuar === null)
+            ? $endOfDay
+            : ($effectiveEnd !== null ? $effectiveEnd->addHours($autoCloseHours) : $endOfDay);
+        $closeDeadline = $closeDeadline->greaterThan($endOfDay) ? $endOfDay : $closeDeadline;
+
+        $retryDeadline = (! $isEffectiveWorkDay && $dinasLuar === null)
+            ? $endOfDay
+            : ($effectiveEnd ?? $endOfDay);
 
         $canRetryRejected = $rejectedLog !== null
             && $rejectedLog->clock_out_at === null
-            && $nowLocal->lessThan($closeDeadline);
+            && $nowLocal->lessThan($retryDeadline);
 
         $recentLogs = AttendanceLog::query()
             ->with('shift:id,code')
@@ -153,6 +160,7 @@ class OfficeAttendanceController extends Controller
             'effectiveStartIso' => $effectiveStart?->toIso8601String(),
             'effectiveEndIso' => $effectiveEnd?->toIso8601String(),
             'closeDeadlineIso' => $closeDeadline->toIso8601String(),
+            'retryDeadlineIso' => $retryDeadline->toIso8601String(),
             'activeLog' => $activeLog !== null ? $this->summarizeAttendanceLog($activeLog) : null,
             'rejectedLog' => $rejectedLog !== null ? $this->summarizeAttendanceLog($rejectedLog) : null,
             'canRetryRejected' => $canRetryRejected,
@@ -252,10 +260,10 @@ class OfficeAttendanceController extends Controller
 
         $effectiveStart = $this->scheduleResolver->effectiveStartTime($workDate, $timezone, $shift, $dinasLuar);
         $effectiveEnd = $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
-        $autoCloseHours = $shift !== null ? $shift->auto_close_hours : 5;
-        $closeDeadline = $effectiveEnd !== null
-            ? $effectiveEnd->addHours($autoCloseHours)
-            : CarbonImmutable::parse("{$workDate} 23:59:59", $timezone);
+        $endOfDay = CarbonImmutable::parse("{$workDate} 23:59:59", $timezone);
+        $retryDeadline = (! $isEffectiveWorkDay && $dinasLuar === null)
+            ? $endOfDay
+            : ($effectiveEnd ?? $endOfDay);
 
         $lastRejected = AttendanceLog::query()
             ->where('user_id', $user->id)
@@ -268,16 +276,17 @@ class OfficeAttendanceController extends Controller
         $attemptNo = 1;
 
         if ($lastRejected !== null) {
-            if ($lastRejected->clock_out_at !== null || $nowLocal->greaterThanOrEqualTo($closeDeadline)) {
+            if ($lastRejected->clock_out_at !== null || $nowLocal->greaterThanOrEqualTo($retryDeadline)) {
                 throw ValidationException::withMessages([
                     'attendance' => ['Batas waktu absen ulang sudah berakhir. Hubungi HR Admin untuk koreksi status.'],
                 ]);
             }
             $isRetry = true;
             $attemptNo = $lastRejected->attempt_no + 1;
-        } elseif (! $isDayOff && $effectiveStart !== null && $effectiveEnd !== null) {
+        } elseif ((! $isDayOff || $dinasLuar !== null) && $effectiveStart !== null && $effectiveEnd !== null) {
             $openAt = $effectiveStart->subHours(2);
-            if ($nowLocal->lessThan($openAt) || $nowLocal->greaterThanOrEqualTo($effectiveEnd)) {
+            $clampedEffectiveEnd = $effectiveEnd->greaterThan($endOfDay) ? $endOfDay : $effectiveEnd;
+            if ($nowLocal->lessThan($openAt) || $nowLocal->greaterThanOrEqualTo($clampedEffectiveEnd)) {
                 throw ValidationException::withMessages([
                     'attendance' => ['Clock-In di luar jendela waktu shift yang diizinkan.'],
                 ]);
@@ -307,17 +316,20 @@ class OfficeAttendanceController extends Controller
         $isRetryAfterEnd = $isRetry && $effectiveEnd !== null && $nowLocal->greaterThanOrEqualTo($effectiveEnd);
         $lateMinutes = 0;
 
-        if (! $isDayOff && $effectiveStart !== null) {
-            $grace = $shift->grace_period_minutes;
+        if ((! $isDayOff || $dinasLuar !== null) && $effectiveStart !== null) {
+            $grace = $shift !== null ? $shift->grace_period_minutes : 10;
             $lateCutoff = $effectiveStart->addMinutes($grace);
             if ($nowLocal->greaterThan($lateCutoff)) {
-                $lateMinutes = (int) $effectiveStart->diffInMinutes($nowLocal);
+                $lateMinutes = max(1, (int) ceil($effectiveStart->diffInSeconds($nowLocal) / 60));
             }
         }
 
-        if (($geoEval['requires_notes'] || $isDayOff || $isRetryAfterEnd) && mb_strlen($notes) < 10) {
+        $isInsideOfficeRadius = $distanceM <= $office->radius_m;
+        $requiresDayOffNotes = $isDayOff && $dinasLuar === null;
+        $requiresClockInNotes = ! $isInsideOfficeRadius && ($geoEval['requires_notes'] || $requiresDayOffNotes || $isRetryAfterEnd);
+        if ($requiresClockInNotes && mb_strlen($notes) < 10) {
             throw ValidationException::withMessages([
-                'notes' => ['Alasan wajib diisi minimal 10 karakter untuk kondisi lokasi, lembur/hari libur, atau absen ulang.'],
+                'notes' => ['Alasan wajib diisi minimal 10 karakter untuk Clock-In di luar radius kantor.'],
             ]);
         }
 
@@ -340,45 +352,10 @@ class OfficeAttendanceController extends Controller
             }
         }
 
-        $gpsTokenResult = $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
-        $camTokenResult = $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
+        $gpsTokenResult = $this->tokenGuard->validateGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+        $this->tokenGuard->validateCameraToken((string) $validated['camera_token'], $user->id);
 
         $deviceId = $this->helper->resolveDeviceId($request);
-        $fraud = $this->antiFraud->evaluate(
-            userId: $user->id,
-            localDate: $workDate,
-            lat: $lat,
-            lng: $lng,
-            accuracyM: $accuracyM,
-            nowUtc: $nowUtc,
-            deviceId: $deviceId,
-            isInsideRadius: $distanceM <= $office->radius_m,
-            isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
-        );
-
-        $isOfficeCompliant = $dinasLuar === null
-            && ! $isDayOff
-            && $distanceM <= $office->radius_m
-            && $accuracyM <= $office->radius_m
-            && $accuracyM <= 100.0;
-
-        $fraudFlags = $isOfficeCompliant
-            ? array_values(array_diff($fraud['flags'], ['REPEATED_COORDS', 'CONSTANT_ACCURACY']))
-            : $fraud['flags'];
-
-        $flags = [...$geoEval['flags'], ...$fraudFlags];
-        if ($isDayOff) {
-            $flags[] = 'OFF_DAY_ATTENDANCE';
-        }
-        if ($dinasLuar !== null) {
-            $flags[] = 'OFFSITE_DUTY';
-        }
-        if ($isLatePermission) {
-            $flags[] = 'LATE_PERMISSION';
-        }
-        $flags = array_values(array_unique($flags));
-        $needsReview = $flags !== [] || $isDayOff || $isRetryAfterEnd;
-
         /** @var UploadedFile $photo */
         $photo = $request->file('photo');
         $photoPath = $this->imageEvidence->storeWatermarkedPhoto(
@@ -414,14 +391,53 @@ class OfficeAttendanceController extends Controller
                 $notes,
                 $idempotencyKey,
                 $lateMinutes,
-                $needsReview,
-                $flags,
+                $geoEval,
+                $gpsTokenResult,
+                $isDayOff,
+                $isLatePermission,
+                $isRetryAfterEnd,
                 $effectiveStart,
                 $effectiveEnd,
+                $validated,
             ): AttendanceLog {
                 $this->helper->cancelPendingLeaveDayOnPresence($user->id, $workDate);
 
-                return AttendanceLog::query()->create([
+                $fraud = $this->antiFraud->evaluate(
+                    userId: $user->id,
+                    localDate: $workDate,
+                    lat: $lat,
+                    lng: $lng,
+                    accuracyM: $accuracyM,
+                    nowUtc: $nowUtc,
+                    deviceId: $deviceId,
+                    isInsideRadius: $distanceM <= $office->radius_m,
+                    isStaleTimestamp: $gpsTokenResult['stale'],
+                );
+
+                $isOfficeCompliant = $dinasLuar === null
+                    && ! $isDayOff
+                    && $distanceM <= $office->radius_m
+                    && $accuracyM <= $office->radius_m
+                    && $accuracyM <= 100.0;
+
+                $fraudFlags = $isOfficeCompliant
+                    ? array_values(array_diff($fraud['flags'], ['REPEATED_COORDS', 'CONSTANT_ACCURACY']))
+                    : $fraud['flags'];
+
+                $flags = [...$geoEval['flags'], ...$fraudFlags];
+                if ($isDayOff) {
+                    $flags[] = 'OFF_DAY_ATTENDANCE';
+                }
+                if ($dinasLuar !== null) {
+                    $flags[] = 'OFFSITE_DUTY';
+                }
+                if ($isLatePermission) {
+                    $flags[] = 'LATE_PERMISSION';
+                }
+                $flags = array_values(array_unique($flags));
+                $needsReview = $flags !== [] || $isDayOff || $isRetryAfterEnd;
+
+                $created = AttendanceLog::query()->create([
                     'user_id' => $user->id,
                     'location_id' => $office->id,
                     'shift_id' => $shift?->id,
@@ -453,6 +469,11 @@ class OfficeAttendanceController extends Controller
                     'clock_in_status' => $needsReview ? VerificationStatus::PENDING_REVIEW : VerificationStatus::AUTO_APPROVED,
                     'clock_in_anomaly_flags' => $flags !== [] ? $flags : null,
                 ]);
+
+                $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+                $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
+
+                return $created;
             });
         } catch (QueryException $e) {
             if ((string) $e->getCode() === '23000') {
@@ -515,6 +536,7 @@ class OfficeAttendanceController extends Controller
             ->with(['location', 'shift', 'leaveRequest'])
             ->where('user_id', $user->id)
             ->where('is_active_attempt', 1)
+            ->where('clock_in_status', '!=', VerificationStatus::REJECTED)
             ->whereNull('clock_out_at')
             ->latest('work_date')
             ->first();
@@ -534,7 +556,8 @@ class OfficeAttendanceController extends Controller
 
         $shift = $log->shift;
         $dinasLuar = $log->leaveRequest;
-        $isDayOff = ! $this->balanceService->isEffectiveWorkDay($user, $workDate) || $shift === null;
+        $isEffectiveWorkDay = $this->balanceService->isEffectiveWorkDay($user, $workDate);
+        $isDayOff = ! $isEffectiveWorkDay || $shift === null;
         $officeLat = $log->office_lat !== null ? (float) $log->office_lat : (float) $lockedLocation->latitude;
         $officeLng = $log->office_lng !== null ? (float) $log->office_lng : (float) $lockedLocation->longitude;
         $officeRadius = $log->office_radius_m ?? $lockedLocation->radius_m;
@@ -544,9 +567,9 @@ class OfficeAttendanceController extends Controller
             : $this->scheduleResolver->effectiveEndTime($workDate, $timezone, $shift, $dinasLuar);
 
         $endOfDay = CarbonImmutable::parse("{$workDate} 23:59:59", $timezone);
-        $closeCap = $effectiveEnd !== null
-            ? $effectiveEnd->addHours($log->auto_close_hours ?? 5)
-            : $endOfDay;
+        $closeCap = (! $isEffectiveWorkDay && $dinasLuar === null)
+            ? $endOfDay
+            : ($effectiveEnd !== null ? $effectiveEnd->addHours($log->auto_close_hours ?? 5) : $endOfDay);
         $closeCap = $closeCap->greaterThan($endOfDay) ? $endOfDay : $closeCap;
 
         if (in_array('MISSED_CLOCK_OUT', $log->clock_out_anomaly_flags ?? [], true)) {
@@ -594,7 +617,7 @@ class OfficeAttendanceController extends Controller
             && CarbonImmutable::parse($log->clock_in_at)->setTimezone($timezone)->greaterThanOrEqualTo($effectiveEnd);
 
         $notes = trim((string) ($validated['notes'] ?? ''));
-        $requiresNotes = $geoEval['requires_notes'] || $earlyLeaveMinutes > 0 || $isDayOff || $isRetryAfterEnd;
+        $requiresNotes = $geoEval['requires_notes'] || $earlyLeaveMinutes > 0 || ($isDayOff && $dinasLuar === null) || $isRetryAfterEnd;
 
         if ($requiresNotes && mb_strlen($notes) < 10) {
             throw ValidationException::withMessages([
@@ -602,35 +625,10 @@ class OfficeAttendanceController extends Controller
             ]);
         }
 
-        $gpsTokenResult = $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
-        $camTokenResult = $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
+        $gpsTokenResult = $this->tokenGuard->validateGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+        $this->tokenGuard->validateCameraToken((string) $validated['camera_token'], $user->id);
 
         $deviceId = $this->helper->resolveDeviceId($request);
-        $fraud = $this->antiFraud->evaluate(
-            userId: $user->id,
-            localDate: $workDate,
-            lat: $lat,
-            lng: $lng,
-            accuracyM: $accuracyM,
-            nowUtc: $nowUtc,
-            deviceId: $deviceId,
-            isInsideRadius: $distanceM <= $officeRadius,
-            isStaleTimestamp: $gpsTokenResult['stale'] || $camTokenResult['stale'],
-        );
-
-        $isOfficeCompliant = $dinasLuar === null
-            && ! $isDayOff
-            && $distanceM <= $officeRadius
-            && $accuracyM <= $officeRadius
-            && $accuracyM <= 100.0;
-
-        $fraudFlags = $isOfficeCompliant
-            ? array_values(array_diff($fraud['flags'], ['REPEATED_COORDS', 'CONSTANT_ACCURACY']))
-            : $fraud['flags'];
-
-        $allFlags = array_values(array_unique([...$flags, ...$fraudFlags]));
-        $needsReview = $allFlags !== [] || $isDayOff || $isRetryAfterEnd;
-
         /** @var UploadedFile $photo */
         $photo = $request->file('photo');
         $photoPath = $this->imageEvidence->storeWatermarkedPhoto(
@@ -648,22 +646,74 @@ class OfficeAttendanceController extends Controller
         );
 
         try {
-            $log->update([
-                'clock_out_at' => $nowUtc,
-                'clock_out_photo_url' => $photoPath,
-                'clock_out_lat' => $lat,
-                'clock_out_lng' => $lng,
-                'clock_out_accuracy_m' => $accuracyM,
-                'clock_out_distance_m' => $distanceM,
-                'clock_out_device_id' => $deviceId !== '' ? $deviceId : null,
-                'clock_out_ip' => $request->ip(),
-                'clock_out_user_agent' => $request->userAgent(),
-                'clock_out_notes' => $notes !== '' ? $notes : null,
-                'clock_out_idempotency_key' => $idempotencyKey,
-                'early_leave_minutes' => $earlyLeaveMinutes,
-                'clock_out_status' => $needsReview ? VerificationStatus::PENDING_REVIEW : VerificationStatus::AUTO_APPROVED,
-                'clock_out_anomaly_flags' => $allFlags !== [] ? $allFlags : null,
-            ]);
+            DB::transaction(function () use (
+                $log,
+                $workDate,
+                $officeRadius,
+                $dinasLuar,
+                $isDayOff,
+                $isRetryAfterEnd,
+                $flags,
+                $gpsTokenResult,
+                $nowUtc,
+                $photoPath,
+                $lat,
+                $lng,
+                $accuracyM,
+                $distanceM,
+                $deviceId,
+                $request,
+                $notes,
+                $idempotencyKey,
+                $earlyLeaveMinutes,
+                $validated,
+                $user,
+            ): void {
+                $fraud = $this->antiFraud->evaluate(
+                    userId: $user->id,
+                    localDate: $workDate,
+                    lat: $lat,
+                    lng: $lng,
+                    accuracyM: $accuracyM,
+                    nowUtc: $nowUtc,
+                    deviceId: $deviceId,
+                    isInsideRadius: $distanceM <= $officeRadius,
+                    isStaleTimestamp: $gpsTokenResult['stale'],
+                );
+
+                $isOfficeCompliant = $dinasLuar === null
+                    && ! $isDayOff
+                    && $distanceM <= $officeRadius
+                    && $accuracyM <= $officeRadius
+                    && $accuracyM <= 100.0;
+
+                $fraudFlags = $isOfficeCompliant
+                    ? array_values(array_diff($fraud['flags'], ['REPEATED_COORDS', 'CONSTANT_ACCURACY']))
+                    : $fraud['flags'];
+
+                $allFlags = array_values(array_unique([...$flags, ...$fraudFlags]));
+                $needsReview = $allFlags !== [] || $isDayOff || $isRetryAfterEnd;
+
+                $log->update([
+                    'clock_out_at' => $nowUtc,
+                    'clock_out_photo_url' => $photoPath,
+                    'clock_out_lat' => $lat,
+                    'clock_out_lng' => $lng,
+                    'clock_out_accuracy_m' => $accuracyM,
+                    'clock_out_distance_m' => $distanceM,
+                    'clock_out_device_id' => $deviceId !== '' ? $deviceId : null,
+                    'clock_out_ip' => $request->ip(),
+                    'clock_out_user_agent' => $request->userAgent(),
+                    'clock_out_notes' => $notes !== '' ? $notes : null,
+                    'clock_out_idempotency_key' => $idempotencyKey,
+                    'early_leave_minutes' => $earlyLeaveMinutes,
+                    'clock_out_status' => $needsReview ? VerificationStatus::PENDING_REVIEW : VerificationStatus::AUTO_APPROVED,
+                    'clock_out_anomaly_flags' => $allFlags !== [] ? $allFlags : null,
+                ]);
+
+                $this->tokenGuard->consumeGpsSessionToken((string) $validated['gps_session_token'], $user->id);
+                $this->tokenGuard->consumeCameraToken((string) $validated['camera_token'], $user->id);
+            });
         } catch (Throwable $e) {
             $this->imageEvidence->delete($photoPath);
 

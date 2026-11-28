@@ -70,6 +70,7 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
         Route::post('attendance/{attendanceLog}/review', [HrDashboardController::class, 'reviewAttendance'])->name('attendance.review');
         Route::post('attendance/{attendanceLog}/correct', [HrDashboardController::class, 'correctAttendanceStatus'])->name('attendance.correct');
         Route::post('visits/{salesVisit}/review', [HrDashboardController::class, 'reviewVisit'])->name('visits.review');
+        Route::post('visits/{salesVisit}/correct', [HrDashboardController::class, 'correctVisitStatus'])->name('visits.correct');
         Route::post('reviews/bulk-approve', [HrDashboardController::class, 'bulkApprove'])->name('reviews.bulk-approve');
         Route::post('attendance/manual', [HrDashboardController::class, 'storeManualAttendance'])->name('attendance.manual');
 
@@ -90,6 +91,7 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
         Route::post('users/{user}/leave-balance', [MasterDataController::class, 'adjustLeaveBalance'])->name('users.leave-balance');
         Route::post('users/leave-balances/import', [MasterDataController::class, 'importLeaveBalancesCsv'])->name('users.leave-balances.import');
         Route::post('users/{user}/schedule-override', [MasterDataController::class, 'overrideSchedule'])->name('users.schedule-override');
+        Route::post('users/{user}/schedule-override/cancel', [MasterDataController::class, 'cancelScheduleOverride'])->name('users.schedule-override.cancel');
 
         Route::post('holidays', [MasterDataController::class, 'storeHoliday'])->name('holidays.store');
         Route::patch('holidays/{holiday}', [MasterDataController::class, 'updateHoliday'])->name('holidays.update');
@@ -107,7 +109,6 @@ Route::middleware(['auth', 'verified', 'active', 'password.changed', 'consent'])
 
         Route::post('shift-patterns', [MasterDataController::class, 'storeShiftPattern'])->name('shift-patterns.store');
         Route::patch('shift-patterns/{shiftPattern}', [MasterDataController::class, 'updateShiftPattern'])->name('shift-patterns.update');
-        Route::post('shift-patterns/{shiftPattern}/generate', [MasterDataController::class, 'generateSchedulesForPattern'])->name('shift-patterns.generate');
         Route::post('shift-patterns/{shiftPattern}/deactivate', [MasterDataController::class, 'deactivateShiftPattern'])->name('shift-patterns.deactivate');
 
         Route::post('activity-categories', [MasterDataController::class, 'storeActivityCategory'])->name('activity-categories.store');

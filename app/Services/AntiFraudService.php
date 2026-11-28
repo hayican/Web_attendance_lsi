@@ -68,6 +68,10 @@ class AntiFraudService
         float $accuracyM,
         CarbonImmutable $nowUtc,
     ): bool {
+        if ($accuracyM > 500.0) {
+            return false;
+        }
+
         /** @var list<array{at: int, lat: float, lng: float, acc: float}> $points */
         $points = [];
 

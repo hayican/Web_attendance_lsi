@@ -1,8 +1,11 @@
 <?php
 
 use App\Enums\UserRole;
+use App\Http\Middleware\EnsureSingleSession;
 use App\Models\User;
 use App\Services\LoginThrottleService;
+use Illuminate\Support\Facades\Cache;
+use Inertia\Testing\AssertableInertia;
 
 test('users can login using NIK or email and are redirected by role', function () {
     $office = User::factory()->create([
@@ -158,4 +161,61 @@ test('role middleware strictly separates office, sales, and HR routes', function
     $this->actingAs($hr)->get('/admin/dashboard')->assertOk();
     $this->actingAs($hr)->get('/attendance/office')->assertOk();
     $this->actingAs($hr)->get('/attendance/sales')->assertForbidden();
+});
+
+test('first-time login enforces password change before UU PDP consent and office access', function () {
+    $user = User::factory()->create([
+        'nik' => 'OFF901',
+        'role' => UserRole::EMPLOYEE_OFFICE,
+        'must_change_password' => true,
+        'consent_accepted_at' => null,
+    ]);
+
+    $this->post('/login', [
+        'email' => 'OFF901',
+        'password' => 'password',
+    ])->assertRedirect('/attendance/office');
+
+    Cache::forget(EnsureSingleSession::key($user->id));
+
+    $this->actingAs($user)
+        ->get('/attendance/office')
+        ->assertRedirect('/settings/security');
+
+    $this->actingAs($user)
+        ->get('/settings/security')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('settings/Security')
+            ->where('mustChangePassword', true)
+        );
+
+    $this->actingAs($user)
+        ->put('/settings/password', [
+            'current_password' => 'password',
+            'password' => 'NewPassword123!',
+            'password_confirmation' => 'NewPassword123!',
+        ])->assertRedirect('/dashboard');
+
+    $user = $user->fresh();
+    expect($user?->must_change_password)->toBeFalse();
+
+    $this->actingAs($user)
+        ->get('/dashboard')
+        ->assertRedirect('/consent');
+
+    $this->actingAs($user)
+        ->get('/consent')
+        ->assertOk();
+
+    $this->actingAs($user)
+        ->post('/consent/accept')
+        ->assertRedirect('/attendance/office');
+
+    $user = $user->fresh();
+    expect($user?->consent_accepted_at)->not->toBeNull();
+
+    $this->actingAs($user)
+        ->get('/attendance/office')
+        ->assertOk();
 });

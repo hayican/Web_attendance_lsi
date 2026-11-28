@@ -2,7 +2,7 @@
     export const layout = {
         title: 'Persetujuan Data Pribadi (UU PDP)',
         description:
-            'Harap setujui penggunaan data lokasi GPS, kamera, dan dokumen medis untuk keperluan absensi PT. LSI.',
+            'Setujui penggunaan lokasi GPS, kamera, dan surat dokter untuk absensi kerja Anda di PT. LSI.',
     };
 </script>
 
@@ -47,21 +47,13 @@
         class="rounded-lg border bg-muted/40 p-4 text-sm leading-relaxed text-muted-foreground"
     >
         <p class="mb-2 font-medium text-foreground">
-            Dengan melanjutkan, Anda menyetujui pemrosesan data berikut oleh PT.
-            LSI:
+            Setuju penggunaan data berikut untuk absensi kerja Anda:
         </p>
         <ul class="list-disc space-y-1.5 pl-5">
+            <li>Lokasi GPS saat absen kantor atau kunjungan toko.</li>
+            <li>Foto selfie langsung dari kamera sebagai bukti kehadiran.</li>
             <li>
-                Koordinat lokasi GPS saat absensi kantor atau kunjungan toko
-                sales.
-            </li>
-            <li>
-                Foto selfie langsung melalui kamera perangkat sebagai bukti
-                kehadiran.
-            </li>
-            <li>
-                Lampiran dokumen medis atau Surat Keterangan Dokter (SKD) jika
-                mengajukan izin sakit.
+                Lampiran surat dokter (SKD) jika Anda mengajukan izin sakit.
             </li>
         </ul>
     </div>

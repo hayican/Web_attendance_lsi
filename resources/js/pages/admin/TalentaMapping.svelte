@@ -51,31 +51,31 @@
     ]);
 
     const keyLabels: Record<string, string> = {
-        attendance_present: 'Kode Hadir (Present)',
-        attendance_absent: 'Kode Alpa (Absent)',
-        timeoff_annual: 'Cuti Tahunan (CUTI)',
-        timeoff_collective: 'Cuti Bersama (>= 1 Tahun)',
-        timeoff_collective_unpaid: 'Cuti Bersama Unpaid (< 1 Tahun)',
-        timeoff_izin: 'Izin (IZIN)',
-        timeoff_sakit: 'Sakit (SAKIT)',
-        use_offsite_schedule_for_talenta: 'Gunakan Jam Dinas Luar untuk Schedule In/Out',
-        export_offday_overtime_to_talenta: 'Ekspor Lembur Hari OFF ke Kolom Overtime',
+        attendance_present: 'Kode Hadir',
+        attendance_absent: 'Kode Alpa',
+        timeoff_annual: 'Cuti Tahunan',
+        timeoff_collective: 'Cuti Bersama (masa kerja >= 1 tahun)',
+        timeoff_collective_unpaid: 'Cuti Bersama Tanpa Gaji (< 1 tahun)',
+        timeoff_izin: 'Izin',
+        timeoff_sakit: 'Sakit',
+        use_offsite_schedule_for_talenta: 'Pakai Jam Dinas Luar untuk Jadwal Masuk/Pulang',
+        export_offday_overtime_to_talenta: 'Ekspor Lembur Hari Libur ke Kolom Lembur',
     };
 
     const groups = $derived([
         {
-            title: 'Attendance Code (File 1 Talenta)',
-            subtitle: 'Kode status kehadiran harian staf kantor & HR pada kolom Attendance Code.',
+            title: 'Kode Kehadiran (File 1 Talenta)',
+            subtitle: 'Kode status hadir harian staf kantor dan HR pada kolom Attendance Code.',
             items: mappings.filter((m) => m.mapping_key.startsWith('attendance_')),
         },
         {
-            title: 'Time Off Code (File 1 Talenta)',
-            subtitle: 'Kode ketidakhadiran disetujui pada kolom Time Off Code (cuti harian penuh).',
+            title: 'Kode Ketidakhadiran (File 1 Talenta)',
+            subtitle: 'Kode cuti, izin, dan sakit disetujui pada kolom Time Off Code.',
             items: mappings.filter((m) => m.mapping_key.startsWith('timeoff_')),
         },
         {
             title: 'Opsi Ekspor File 1 Talenta',
-            subtitle: 'Parameter perilaku ekspor dinas luar dan lembur hari libur mingguan (true/false).',
+            subtitle: 'Atur ekspor dinas luar dan lembur hari libur mingguan.',
             items: mappings.filter((m) => booleanKeys.has(m.mapping_key)),
         },
     ]);
@@ -117,7 +117,8 @@
                 return;
             }
 
-            successMsg = `Konfigurasi "${m.mapping_key}" berhasil disimpan & dicatat ke audit log.`;
+            const label = keyLabels[m.mapping_key] ?? m.mapping_key;
+            successMsg = `Pengaturan "${label}" berhasil disimpan dan dicatat ke riwayat audit.`;
             router.reload();
         } finally {
             savingId = null;
@@ -125,7 +126,7 @@
     }
 </script>
 
-<AppHead title="Mapping Kode Talenta" />
+<AppHead title="Pengaturan Kode Ekspor Talenta" />
 
 <div class="space-y-4 p-4 text-stone-900 lg:p-5">
     <div
@@ -133,10 +134,10 @@
     >
         <div>
             <h1 class="text-lg font-semibold tracking-tight text-white md:text-xl">
-                Pengaturan Mapping Kode Mekari Talenta
+                Pengaturan Kode Ekspor Talenta
             </h1>
             <p class="text-xs text-stone-200">
-                Kelola pemetaan kode kehadiran, Time Off, dan parameter ekspor File 1 Talenta (otomatis tercatat di audit log)
+                Atur kode kehadiran, cuti/izin, dan opsi ekspor ke Mekari Talenta. Semua perubahan tercatat di riwayat audit.
             </p>
         </div>
         <Link
@@ -181,7 +182,7 @@
                                 </div>
                                 <Input
                                     bind:value={draftDescriptions[m.id]}
-                                    placeholder="Keterangan mapping"
+                                    placeholder="Catatan singkat (opsional)"
                                     class="h-7 max-w-md border-stone-200 text-xs text-stone-600"
                                 />
                                 {#if m.updater}
@@ -198,8 +199,8 @@
                                         bind:value={draftValues[m.id]}
                                         class="h-8 w-28 rounded-md border border-stone-300 bg-white px-2 font-mono text-xs text-stone-900"
                                     >
-                                        <option value="true">true</option>
-                                        <option value="false">false</option>
+                                        <option value="true">Aktif</option>
+                                        <option value="false">Nonaktif</option>
                                     </select>
                                 {:else}
                                     <Input

@@ -54,10 +54,8 @@
 
     type LeaveProps = {
         office: {
-            name: string;
             timezone: string;
         };
-        serverTimeIso: string;
         balance: {
             year: number;
             base_quota: number;
@@ -124,7 +122,7 @@
             case 'REJECTED':
                 return { label: 'Ditolak', className: `${badgeBase} ${toneError}` };
             case 'PARTIALLY_CANCELLED':
-                return { label: 'Sebagian Dibatalkan', className: `${badgeBase} ${toneInfo}` };
+                return { label: 'Sebagian dibatalkan', className: `${badgeBase} ${toneInfo}` };
             case 'CANCELLED':
                 return { label: 'Dibatalkan', className: `${badgeBase} ${toneNeutral}` };
             default:
@@ -134,7 +132,7 @@
 
     function formatDate(value: string | null | undefined): string {
         if (!value) {
-            return '—';
+            return '-';
         }
 
         const datePart = value.slice(0, 10);
@@ -163,14 +161,11 @@
         }
 
         const dates: string[] = [];
-        const cursor = new Date(`${start}T12:00:00Z`);
-        const last = new Date(`${end}T12:00:00Z`);
+        const endMs = Date.parse(`${end}T12:00:00Z`);
 
-        while (cursor <= last) {
-            dates.push(cursor.toISOString().slice(0, 10));
-            cursor.setUTCDate(cursor.getUTCDate() + 1);
+        for (let ms = Date.parse(`${start}T12:00:00Z`); ms <= endMs; ms += 86_400_000) {
+            dates.push(new Date(ms).toISOString().slice(0, 10));
         }
-
         return dates;
     }
 
@@ -208,27 +203,27 @@
             options.push({
                 value: 'CUTI',
                 label: 'Cuti Tahunan',
-                hint: 'Minimal H-3 hari kerja, maksimal normal 2 hari/bulan, tidak dapat backdate.',
+                hint: 'Ajukan minimal H-3 hari kerja, batas normal 2 hari/bulan, tidak bisa mundur tanggal.',
             });
         }
 
         options.push({
             value: 'IZIN',
             label: 'Izin',
-            hint: 'Maksimal 2 hari kerja efektif, boleh susulan maksimal H-2 hari kerja.',
+            hint: 'Maksimal 2 hari kerja, boleh susulan maksimal 2 hari kerja.',
         });
 
         options.push({
             value: 'SAKIT',
             label: 'Sakit',
-            hint: 'Boleh susulan maksimal H-2 hari kerja dan wajib melampirkan SKD.',
+            hint: 'Boleh susulan maksimal 2 hari kerja dan wajib lampirkan surat dokter (SKD).',
         });
 
         if (canSubmitDinasLuar) {
             options.push({
                 value: 'DINAS_LUAR',
                 label: 'Dinas Luar',
-                hint: 'Ajukan minimal H-1, wajib isi lokasi tujuan dan jam mulai agenda.',
+                hint: 'Ajukan minimal H-1, wajib isi lokasi tujuan dan jam mulai.',
             });
         }
 
@@ -450,14 +445,14 @@
 
             if (data.hr_conflict_warning) {
                 serverWarnings.push(
-                    'Pada tanggal tersebut, jumlah HR Admin yang masuk kerja tersisa kurang dari 2 orang sehingga verifikasi antar-HR berpotensi tertunda.',
+                    'Pada tanggal itu, HR yang masuk kurang dari 2 orang sehingga persetujuan mungkin agak lama.',
                 );
             }
 
             formOpen = false;
             pageFeedback = {
                 type: 'success',
-                message: 'Pengajuan berhasil dikirim dan menunggu verifikasi HR.',
+                message: 'Pengajuan terkirim. Menunggu cek HR.',
             };
             reason = '';
             destinationLocation = '';
@@ -617,7 +612,7 @@
                 </p>
             </div>
             <div class="rounded-md border border-stone-200 bg-stone-50 px-1 py-1.5">
-                <p class="text-[10px] text-stone-500">Pending</p>
+                <p class="text-[10px] text-stone-500">Menunggu</p>
                 <p class="font-mono text-sm font-semibold text-stone-900">
                     {formatDays(balance.pending_days)}
                 </p>
@@ -636,7 +631,7 @@
         </div>
 
         <p class="mt-2 text-[11px] leading-snug text-stone-500">
-            Prorata -{formatDays(balance.prorated_deduction)} · Cutber
+            Prorata -{formatDays(balance.prorated_deduction)} · Cuti bersama
             -{formatDays(balance.collective_leave_deduction)}
             {#if balance.adjustment_days !== 0}
                 · Penyesuaian {balance.adjustment_days > 0 ? '+' : ''}{formatDays(
@@ -648,13 +643,13 @@
         {#if !balance.eligible_for_annual_leave}
             <p class="mt-1 text-[11px] leading-snug text-stone-600">
                 {canSubmitDinasLuar
-                    ? 'Hak Cuti Tahunan aktif setelah masa kerja genap 1 tahun. Izin, Sakit, dan Dinas Luar tetap dapat diajukan.'
-                    : 'Hak Cuti Tahunan aktif setelah masa kerja genap 1 tahun. Izin dan Sakit tetap dapat diajukan.'}
+                    ? 'Cuti Tahunan aktif setelah 1 tahun kerja. Anda tetap bisa ajukan Izin, Sakit, dan Dinas Luar.'
+                    : 'Cuti Tahunan aktif setelah 1 tahun kerja. Anda tetap bisa ajukan Izin dan Sakit.'}
             </p>
         {:else if calendar.min_start_dates.CUTI === null}
             <p class="mt-1 text-[11px] leading-snug text-yellow-800">
-                Jadwal 3 bulan ke depan belum tersedia sehingga pengajuan Cuti
-                Tahunan belum dapat dibuat.
+                Jadwal 3 bulan ke depan belum terbit, jadi Cuti Tahunan belum
+                bisa diajukan.
             </p>
         {/if}
     </section>
@@ -737,8 +732,8 @@
 
                     {#if item.type === 'DINAS_LUAR'}
                         <p class="mt-1 text-[11px] leading-snug text-blue-700">
-                            {item.destination_location ?? '—'} · mulai
-                            {item.scheduled_start_time?.slice(0, 5) ?? '—'}
+                            {item.destination_location ?? '-'} · mulai
+                            {item.scheduled_start_time?.slice(0, 5) ?? '-'}
                         </p>
                     {/if}
 
@@ -760,7 +755,7 @@
                                     <li>
                                         {formatDate(day.leave_date)}
                                         {#if day.cancel_reason}
-                                            — {day.cancel_reason}
+                                            : {day.cancel_reason}
                                         {/if}
                                     </li>
                                 {/each}
@@ -789,7 +784,7 @@
                             {#if item.reviewer}
                                 Ditinjau oleh {item.reviewer.name}
                             {:else}
-                                Menunggu verifikasi HR
+                                Menunggu cek HR
                             {/if}
                         </span>
 
@@ -1082,11 +1077,10 @@
 
         <p class="mt-3 rounded-md bg-stone-100 p-2.5 text-[10px] leading-snug text-stone-600">
             {#if calendar.requires_published_schedule}
-                Pengajuan harus berada dalam jadwal 3 bulan yang sudah terbit.
-                Hari libur/OFF tidak dihitung sebagai hari kerja efektif.
+                Pilih tanggal sesuai jadwal 3 bulan yang sudah terbit. Hari
+                libur tidak dihitung.
             {:else}
-                Pengajuan maksimal 90 hari ke depan. Hari libur/OFF tidak
-                dihitung sebagai hari kerja efektif.
+                Maksimal 90 hari ke depan. Hari libur tidak dihitung.
             {/if}
         </p>
 
